@@ -2,6 +2,8 @@
 
 > Assay the weights before you trust them.
 
+<img src="./.github/banner.png">
+
 `assay` is an offline-first, single-binary scanner for ML model artifacts
 (`safetensors`, `GGUF`, PyTorch pickle). It answers two questions about a model
 you just downloaded:
