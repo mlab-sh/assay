@@ -19,6 +19,10 @@ same supply-chain hygiene to model weights.
 > a metal. A model is literally *weights* — so `assay` tests whether those
 > weights are pure (no contaminant) and authentic (real provenance).
 
+📖 **New to `assay`?** [`DUMMIE.md`](./DUMMIE.md) is a complete, illustrated
+walkthrough — ASCII diagrams of every check, both phases, `--deep` / `--profile`,
+and `compare`, with real example output.
+
 ---
 
 ## Status — Phase 2 shipped
@@ -138,6 +142,91 @@ progress prints to stderr (auto-disabled off a TTY or with `--no-progress`);
 
 ---
 
+## Example output
+
+### `scan --deep --profile` on real gpt2 (Phase 1 + Phase 2)
+
+```text
+$ assay scan ./models/gpt2 --deep --profile
+[1/2] ./models/gpt2/model.safetensors CLEAN 3 finding(s) (22.90s)
+[2/2] ./models/gpt2/pytorch_model.bin UNTRUSTED 3 finding(s) (1ms)
+✓ scanned 2 artifact(s) — 1 clean, 1 untrusted, 1.0 GiB in 22.91s
+
+./models/gpt2/model.safetensors  [safetensors]  -> CLEAN
+  manifest: blake3:d4ceed607f7040ba84b91eadef010d98079f9d9d85ffd6faf13d77ce958eccdf
+  signature: unsigned
+  [low]  WEIGHT_OUTLIER_LAYER: layer 3 is anomalous on mean_kurtosis (6.0 MADs from the cross-layer median) — worth a human look, not a verdict
+      - metric=mean_kurtosis, value=119.9821, mads=6.00
+  [low]  WEIGHT_OUTLIER_LAYER: layer 11 is anomalous on l2 (7.3 MADs from the cross-layer median) — worth a human look, not a verdict
+      - metric=l2, value=840.6817, mads=7.27
+  [info] ARCH_DETECTED: structural fingerprint: gpt2 (gpt2)
+      - layers=Some(12), hidden=Some(768), heads=Some(12), vocab=Some(50257)
+
+./models/gpt2/pytorch_model.bin  [pickle]  -> UNTRUSTED
+  signature: unsigned
+  [high]   PICKLE_RCE_RISK: pickle artifact can execute code at load time
+      - execution opcodes: REDUCE, BUILD
+  [medium] PICKLE_TRUNCATED: pickle opcode stream ended unexpectedly or hit an unknown opcode; analysis may be incomplete
+  [info]   SAFE_ALTERNATIVE_AVAILABLE: a safetensors artifact is present in the same repo; prefer it
+
+scanned 2 artifact(s); worst finding: high
+
+./models/gpt2/model.safetensors
+layer profile ▁▁▁▁▁▁▁▁▁▁▁█ (12 layers, metric=l2)
+  min=787.0994  max=840.6817
+  anomalous layers: 3, 11
+```
+
+> Note layers **3 and 11** flagged here. On a model *in isolation* you can't tell
+> a legitimate peak from an injected one — a well-trained transformer is naturally
+> non-uniform. That is exactly why `compare` exists ↓.
+
+### `compare` against a real fine-tune (DialoGPT) — broad drift, no false alarm
+
+```text
+$ assay compare ./models/gpt2 ./models/dialogpt
+compare ./models/gpt2/model.safetensors vs ./models/dialogpt/model.safetensors
+  arch: gpt2 vs gpt2 (match)
+  normalized: stripped wrapper prefix from 160 baseline tensor name(s)
+  160 matched, 0 structural divergence(s), worst rel_l2: 1.4601
+  drift profile ▃▄▄▅▅▆▆▆▇▇██ (12 layers, metric=rel_l2)
+    min=0.1385  max=0.2105
+    no anomalous layers
+  [info] TIED_WEIGHT: 'lm_head.weight' is tied to 'transformer.wte.weight' (weight tying) — a serialization convention, not a divergence
+      - counterpart present on same side with equal values
+```
+
+> DialoGPT is a full fine-tune of gpt2: every layer moved a little (drift is broad
+> and homogeneous), so **nothing is flagged**. The `transformer.` naming prefix is
+> canonicalized away (160 matched, **0** structural divergences), and the tied
+> `lm_head`/`wte` is reported as info, not a divergence.
+
+### `compare` against a tampered copy — the spike lights up
+
+```text
+$ python make_tampered_gpt2.py ./models/gpt2/model.safetensors \
+        ./models/gpt2-tampered/model.safetensors --layer 5 --scale 4.0
+$ assay compare ./models/gpt2 ./models/gpt2-tampered
+compare ./models/gpt2/model.safetensors vs ./models/gpt2-tampered/model.safetensors
+  arch: gpt2 vs gpt2 (match)
+  160 matched, 0 structural divergence(s), worst rel_l2: 0.7500
+  drift profile ▁▁▁▁▁█▁▁▁▁▁▁ (12 layers, metric=rel_l2)
+    min=0.0000  max=0.5359
+    anomalous layers: 5
+  [medium] LAYER_DRIFT_OUTLIER: layer 5 drift is a concentrated outlier (rel_l2=0.536, 12.0 MADs above the cross-layer drift level) — worth a human look, not a verdict
+      - dominant tensor: h.5.mlp.c_fc.weight
+  [medium] TENSOR_DRIFT: tensor 'h.5.mlp.c_fc.weight' dominates the drift of layer 5
+```
+
+> Only the tampered layer 5 spikes. Layers 3 and 11 — the ones the standalone
+> profile flagged above — stay **silent** here: they don't move versus the
+> baseline. That's the payoff of differential analysis.
+
+See [`DUMMIE.md`](./DUMMIE.md) for an illustrated, line-by-line explanation of
+every field in this output.
+
+---
+
 ## What Phase 1 actually checks
 
 ### Format detection
@@ -221,4 +310,8 @@ signature-mismatch.
   high-confidence by design; it never pretends to detect backdoors it can't.
 - **Dogfood-able.** Built to be run on real artifacts pulled off public hubs.
 
-See [`TEST.md`](./TEST.md) to download real models and try it in two minutes.
+## Learn more
+
+- [`DUMMIE.md`](./DUMMIE.md) — the complete illustrated walkthrough: ASCII
+  diagrams of every check, both phases, `--deep` / `--profile`, and `compare`.
+- [`TEST.md`](./TEST.md) — download real models and try it in two minutes.
