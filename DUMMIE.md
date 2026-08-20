@@ -124,15 +124,16 @@ ERROR      ❌  internal error (I/O, etc.)
 ### The exit codes (for CI)
 
 ```
-┌──────┬──────────────────────────────────────────────┐
-│ code │ meaning                                       │
-├──────┼──────────────────────────────────────────────┤
-│  0   │ clean, nothing at/above the --fail-on level   │
-│  1   │ findings at/above --fail-on severity          │
-│  2   │ unreadable / malformed artifact (parse fail)  │
-│  3   │ internal error                                 │
-└──────┴──────────────────────────────────────────────┘
-       precedence: 3 > 2 > 1 > 0  (worst outcome wins)
+┌──────┬────────────────────────────────────────────────────┐
+│ code │ meaning                                            │
+├──────┼────────────────────────────────────────────────────┤
+│  0   │ clean, nothing at/above the --fail-on level        │
+│  1   │ findings at/above --fail-on severity               │
+│  2   │ unreadable / malformed artifact (parse fail)       │
+│  3   │ internal error, or the path does not exist         │
+│  4   │ nothing scannable at the path (--allow-empty -> 0) │
+└──────┴────────────────────────────────────────────────────┘
+       precedence: 3 > 4 > 2 > 1 > 0  (worst outcome wins)
 ```
 
 In CI:
@@ -235,6 +236,40 @@ pytorch_model.bin  [pickle]  -> UNTRUSTED
 Pickle findings:
 `PICKLE_RCE_RISK` (high), `PICKLE_GLOBAL_REF` (medium), `PICKLE_UNTRUSTED`
 (medium), `PICKLE_TRUNCATED` (medium), `SAFE_ALTERNATIVE_AVAILABLE` (info).
+
+---
+
+**A `.bin` is usually not one pickle.** `torch.save` without zip
+serialization writes a container, and knowing its shape is the difference
+between a useful report and a permanent shrug:
+
+```
+┌──────────┬──────────┬──────────┬────────────┬───────────┬──────────────────┐
+│ pickle 1 │ pickle 2 │ pickle 3 │  pickle 4  │ pickle 5  │  raw storages    │
+│  magic   │ protocol │ sys_info │ the module │ stor. keys│  (tensor bytes)  │
+│ 0x1950…  │  1001    │  {...}   │  <- payload│  [...]    │  ████████████    │
+└──────────┴──────────┴──────────┴────────────┴───────────┴──────────────────┘
+ 0                                                     25917          548118077
+ └──────────────── opcodes, all analyzed ─────────────────┘└─ no opcodes here ─┘
+```
+
+Reading that as a single opcode stream means dying on the first storage byte
+and calling a perfectly normal checkpoint truncated. `assay` splits the
+streams, so the report can say which one carried the payload and where the
+opcodes stop:
+
+```
+[high] PICKLE_RCE_RISK: pickle artifact can execute code at load time
+    - stream 4/5: execution opcodes: REDUCE, BUILD
+[info] PICKLE_TORCH_LEGACY: legacy torch container: 5 pickle stream(s) analyzed
+       in full (bytes 0..25917); the remaining 548092160 byte(s) are the raw
+       tensor storage payload, which carries no opcodes
+```
+
+`PICKLE_TRUNCATED` is then reserved for a stream that really did stop before
+its `STOP` opcode, and it names the offset. Bytes stapled after the last stream
+are `PICKLE_TRAILING_DATA`, raised to `high` when they announce themselves with
+a known file signature.
 
 ---
 

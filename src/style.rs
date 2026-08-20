@@ -60,6 +60,7 @@ impl Styler {
             Verdict::Clean => self.green(&s),
             Verdict::Untrusted => self.red(&s),
             Verdict::Malformed => self.yellow(&s),
+            Verdict::Empty => self.yellow(&s),
             Verdict::Error => self.wrap("1;31", &s),
         }
     }

@@ -85,6 +85,9 @@ pub enum Verdict {
     Untrusted,
     /// Could not be parsed as the format it claims to be.
     Malformed,
+    /// Nothing was scanned: the path holds no model artifact. Not a failure of
+    /// the artifact, but not a pass either, because nothing was verified.
+    Empty,
     /// Internal error while processing (IO, etc.).
     Error,
 }
@@ -95,6 +98,7 @@ impl Verdict {
             Verdict::Clean => "clean",
             Verdict::Untrusted => "untrusted",
             Verdict::Malformed => "malformed",
+            Verdict::Empty => "empty",
             Verdict::Error => "error",
         }
     }
@@ -185,6 +189,12 @@ impl ArtifactReport {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ScanReport {
     pub artifacts: Vec<ArtifactReport>,
+    /// True when the only entry describes the *absence* of anything to scan
+    /// (an empty path, or a path that does not exist). It keeps the human
+    /// summary from claiming it scanned an artifact when it scanned nothing.
+    /// Not serialized: the JSON contract is the artifact list.
+    #[serde(skip)]
+    pub nothing_scanned: bool,
 }
 
 impl ScanReport {
@@ -192,6 +202,11 @@ impl ScanReport {
         self.artifacts
             .iter()
             .any(|a| a.verdict == Verdict::Malformed)
+    }
+
+    /// True when the scan found nothing to look at.
+    pub fn is_empty_scan(&self) -> bool {
+        self.artifacts.iter().any(|a| a.verdict == Verdict::Empty)
     }
 
     pub fn any_error(&self) -> bool {
@@ -203,10 +218,21 @@ impl ScanReport {
     }
 
     /// Worst-outcome-wins exit code, per the README table.
-    /// Precedence: 3 (internal) > 2 (malformed) > 1 (findings) > 0 (clean).
-    pub fn exit_code(&self, fail_on: Severity) -> i32 {
+    ///
+    /// Precedence: 3 (internal) > 4 (nothing scanned) > 2 (malformed) >
+    /// 1 (findings) > 0 (clean).
+    ///
+    /// "Nothing scanned" is deliberately not a pass. A mistyped path or a glob
+    /// that matched no file would otherwise turn a supply-chain gate green
+    /// without a single byte having been checked, which is the one failure mode
+    /// a gate must never have. `allow_empty` (from `--allow-empty`) is there for
+    /// pipelines that genuinely scan an optional directory.
+    pub fn exit_code(&self, fail_on: Severity, allow_empty: bool) -> i32 {
         if self.any_error() {
             return 3;
+        }
+        if self.is_empty_scan() {
+            return if allow_empty { 0 } else { 4 };
         }
         if self.any_malformed() {
             return 2;
@@ -264,16 +290,27 @@ impl ScanReport {
             out.push('\n');
         }
         let summary = match self.max_severity() {
+            // A path that does not exist is not the scanner falling over.
+            _ if self.any_error() && self.nothing_scanned => {
+                styler.red("nothing scanned: the path does not exist")
+            }
             _ if self.any_error() => styler.red("internal error"),
+            _ if self.is_empty_scan() => {
+                styler.yellow("nothing scanned: no model artifact at the given path")
+            }
             _ if self.any_malformed() => styler.yellow("malformed artifact(s) present"),
             Some(sev) => format!("worst finding: {}", styler.severity(sev)),
             None => styler.green("clean"),
         };
-        out.push_str(&format!(
-            "scanned {} artifact(s); {}\n",
-            self.artifacts.len(),
-            summary
-        ));
+        if self.nothing_scanned {
+            out.push_str(&format!("{summary}\n"));
+        } else {
+            out.push_str(&format!(
+                "scanned {} artifact(s); {}\n",
+                self.artifacts.len(),
+                summary
+            ));
+        }
         out
     }
 }
@@ -292,7 +329,10 @@ mod tests {
     }
 
     fn scan(artifacts: Vec<ArtifactReport>) -> ScanReport {
-        ScanReport { artifacts }
+        ScanReport {
+            artifacts,
+            nothing_scanned: false,
+        }
     }
 
     #[test]
@@ -313,32 +353,93 @@ mod tests {
     #[test]
     fn exit_code_respects_the_fail_on_threshold() {
         let r = scan(vec![artifact(Verdict::Clean, &[("X", Severity::Medium)])]);
-        assert_eq!(r.exit_code(Severity::High), 0);
-        assert_eq!(r.exit_code(Severity::Medium), 1);
-        assert_eq!(r.exit_code(Severity::Low), 1);
+        assert_eq!(r.exit_code(Severity::High, false), 0);
+        assert_eq!(r.exit_code(Severity::Medium, false), 1);
+        assert_eq!(r.exit_code(Severity::Low, false), 1);
     }
 
     #[test]
     fn exit_code_precedence_is_error_then_malformed_then_findings() {
         let clean = scan(vec![artifact(Verdict::Clean, &[("I", Severity::Info)])]);
-        assert_eq!(clean.exit_code(Severity::High), 0);
+        assert_eq!(clean.exit_code(Severity::High, false), 0);
 
         let flagged = scan(vec![artifact(Verdict::Untrusted, &[("H", Severity::High)])]);
-        assert_eq!(flagged.exit_code(Severity::High), 1);
+        assert_eq!(flagged.exit_code(Severity::High, false), 1);
 
         // A malformed artifact outranks a high finding elsewhere in the scan.
         let malformed = scan(vec![
             artifact(Verdict::Untrusted, &[("H", Severity::High)]),
             artifact(Verdict::Malformed, &[("M", Severity::Medium)]),
         ]);
-        assert_eq!(malformed.exit_code(Severity::High), 2);
+        assert_eq!(malformed.exit_code(Severity::High, false), 2);
 
         // An internal error outranks everything.
         let errored = scan(vec![
             artifact(Verdict::Malformed, &[("M", Severity::Medium)]),
             artifact(Verdict::Error, &[("IO_ERROR", Severity::High)]),
         ]);
-        assert_eq!(errored.exit_code(Severity::High), 3);
+        assert_eq!(errored.exit_code(Severity::High, false), 3);
+    }
+
+    #[test]
+    fn an_empty_scan_is_neither_a_pass_nor_an_internal_error() {
+        let r = scan(vec![artifact(
+            Verdict::Empty,
+            &[("NO_ARTIFACTS", Severity::Info)],
+        )]);
+        assert_eq!(r.exit_code(Severity::High, false), 4);
+        assert_eq!(r.exit_code(Severity::High, true), 0);
+        assert!(r.is_empty_scan());
+        assert!(!r.any_error(), "nothing failed");
+        assert!(!r.any_malformed());
+    }
+
+    #[test]
+    fn an_empty_scan_says_so_instead_of_claiming_an_internal_error() {
+        let styler = crate::style::Styler::new(false);
+        let mut r = scan(vec![artifact(
+            Verdict::Empty,
+            &[("NO_ARTIFACTS", Severity::Info)],
+        )]);
+        r.nothing_scanned = true;
+        let out = r.to_human(&styler);
+        assert!(out.contains("nothing scanned"), "{out}");
+        assert!(!out.contains("internal error"), "{out}");
+        // And it must not claim to have scanned an artifact.
+        assert!(!out.contains("scanned 1 artifact(s)"), "{out}");
+    }
+
+    #[test]
+    fn a_missing_path_is_not_described_as_an_internal_error() {
+        let styler = crate::style::Styler::new(false);
+        let mut r = scan(vec![artifact(
+            Verdict::Error,
+            &[("PATH_NOT_FOUND", Severity::High)],
+        )]);
+        r.nothing_scanned = true;
+        let out = r.to_human(&styler);
+        assert!(out.contains("the path does not exist"), "{out}");
+        assert!(!out.contains("internal error"), "{out}");
+        // Still a hard failure, and still distinct from an empty directory.
+        assert_eq!(r.exit_code(Severity::High, true), 3);
+    }
+
+    #[test]
+    fn a_real_internal_error_still_says_internal_error() {
+        let styler = crate::style::Styler::new(false);
+        let r = scan(vec![artifact(
+            Verdict::Error,
+            &[("IO_ERROR", Severity::High)],
+        )]);
+        let out = r.to_human(&styler);
+        assert!(out.contains("internal error"), "{out}");
+    }
+
+    #[test]
+    fn the_empty_verdict_serializes_by_name() {
+        let r = scan(vec![artifact(Verdict::Empty, &[])]);
+        let v: serde_json::Value = serde_json::from_str(&r.to_json()).unwrap();
+        assert_eq!(v["verdict"], "empty");
     }
 
     #[test]

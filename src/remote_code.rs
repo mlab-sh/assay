@@ -11,7 +11,7 @@
 //! model becomes an artifact with its own verdict, and the config files are
 //! read to find out which of them the loader would actually execute.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -79,9 +79,11 @@ pub fn scan(root: &Path) -> Vec<ArtifactReport> {
 
     let mut py_files = Vec::new();
     let mut config_files = Vec::new();
-    collect(&base, &mut py_files, &mut config_files, 0);
+    collect(&base, &mut py_files, &mut config_files, &mut HashSet::new());
     py_files.sort();
+    py_files.dedup_by_key(|p| std::fs::canonicalize(&*p).unwrap_or_else(|_| p.clone()));
     config_files.sort();
+    config_files.dedup_by_key(|p| std::fs::canonicalize(&*p).unwrap_or_else(|_| p.clone()));
 
     let entries: Vec<AutoMapEntry> = config_files
         .iter()
@@ -96,10 +98,21 @@ pub fn scan(root: &Path) -> Vec<ArtifactReport> {
     reports
 }
 
-/// Walk the tree collecting python and config files. Bounded depth, because a
-/// model repo is shallow and we refuse to chase a symlink maze.
-fn collect(dir: &Path, py: &mut Vec<PathBuf>, cfg: &mut Vec<PathBuf>, depth: usize) {
-    if depth > 4 {
+/// Walk the tree collecting python and config files.
+///
+/// Symlinked files are followed, because a Hugging Face cache snapshot is
+/// nothing but links into `blobs/`: there, a repo's `config.json` and its
+/// `modeling_*.py` are symlinks, and skipping them would mean missing the
+/// `auto_map` entirely. Directory recursion goes through a set of canonical
+/// paths already visited, so a link cycle terminates.
+fn collect(
+    dir: &Path,
+    py: &mut Vec<PathBuf>,
+    cfg: &mut Vec<PathBuf>,
+    visited: &mut HashSet<PathBuf>,
+) {
+    let key = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if !visited.insert(key) {
         return;
     }
     let entries = match std::fs::read_dir(dir) {
@@ -108,15 +121,8 @@ fn collect(dir: &Path, py: &mut Vec<PathBuf>, cfg: &mut Vec<PathBuf>, depth: usi
     };
     for entry in entries.flatten() {
         let p = entry.path();
-        let file_type = match entry.file_type() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        if file_type.is_symlink() {
-            continue; // never follow: a repo's own tree is what we judge
-        }
-        if file_type.is_dir() {
-            collect(&p, py, cfg, depth + 1);
+        if p.is_dir() {
+            collect(&p, py, cfg, visited);
             continue;
         }
         let name = p
@@ -764,19 +770,46 @@ mod tests {
         assert!(scan(&dir).is_empty());
     }
 
+    /// A Hugging Face cache snapshot is made entirely of symlinks into
+    /// `blobs/`, so refusing to follow them would mean seeing nothing at all.
+    #[cfg(unix)]
     #[test]
-    fn symlinked_code_is_not_followed() {
+    fn symlinked_code_and_config_are_followed() {
         let dir = tmpdir("symlink");
+        let blobs = tmpdir("symlink-blobs");
         weights(&dir);
-        let outside = tmpdir("symlink-target");
-        write(&outside, "evil.py", "import os\nos.system('id')\n");
-        #[cfg(unix)]
-        {
-            let _ = std::os::unix::fs::symlink(outside.join("evil.py"), dir.join("evil.py"));
-            assert!(
-                scan(&dir).is_empty(),
-                "a symlink out of the repo is not the repo"
-            );
-        }
+        write(
+            &blobs,
+            "blob-config",
+            r#"{"auto_map":{"AutoModel":"modeling_x.M"}}"#,
+        );
+        write(&blobs, "blob-code", "import os\nos.system('id')\n");
+        std::os::unix::fs::symlink(blobs.join("blob-config"), dir.join("config.json")).unwrap();
+        std::os::unix::fs::symlink(blobs.join("blob-code"), dir.join("modeling_x.py")).unwrap();
+
+        let reports = scan(&dir);
+        let r = report_for(&reports, "modeling_x.py");
+        assert!(finding_ids(r).contains(&"REMOTE_CODE_AUTO_MAP"));
+        assert!(finding_ids(r).contains(&"PY_DANGEROUS_CALL"));
+    }
+
+    /// A directory link cycle must not make the same file be analyzed twice.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_cycle_yields_each_file_once() {
+        let dir = tmpdir("cycle");
+        weights(&dir);
+        write(
+            &dir,
+            "config.json",
+            r#"{"auto_map":{"AutoModel":"modeling_x.M"}}"#,
+        );
+        write(&dir, "modeling_x.py", "import os\nos.system('id')\n");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("sub").join("back")).unwrap();
+
+        let reports = scan(&dir);
+        let code: Vec<_> = reports.iter().filter(|r| r.format == "python").collect();
+        assert_eq!(code.len(), 1, "got {:?}", ids_of(&reports));
     }
 }

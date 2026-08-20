@@ -11,6 +11,7 @@ mod fingerprint;
 mod format;
 mod formats;
 mod hash;
+mod magic;
 mod mapio;
 mod numeric;
 mod phase2;
@@ -99,7 +100,7 @@ fn main() -> ExitCode {
     }
 
     // exit_code() returns the worst outcome (3 > 2 > 1 > 0), per the README table.
-    let code = report.exit_code(common.fail_on);
+    let code = report.exit_code(common.fail_on, common.allow_empty);
     ExitCode::from(code as u8)
 }
 

@@ -94,7 +94,19 @@ can run arbitrary code the moment you load it. `assay`:
 - runs an opcode-level scan for dangerous patterns (`GLOBAL`, `REDUCE`,
   `STACK_GLOBAL`, imports of `os` / `subprocess` / `builtins`, and friends)
 - looks inside torch zip containers rather than stopping at the archive
+- **understands the legacy container**: a `torch.save` file written without zip
+  serialization is not one pickle but five concatenated streams (magic,
+  protocol version, sys_info, the module, the storage keys) followed by raw
+  tensor bytes. `assay` splits them, tells you which stream carried the payload,
+  and states plainly how far the opcodes went and where the storage payload
+  begins, instead of stopping at the first non-opcode byte and calling every
+  ordinary checkpoint truncated
+- flags bytes stapled after the last stream, by signature when the payload
+  announces itself
 - tells you when a clean `safetensors` equivalent sits in the same repo
+
+`PICKLE_TRUNCATED` now means what it says: a stream that stopped before its
+`STOP` opcode, reported with the byte offset where analysis ended.
 
 ### Code shipped with the weights
 
@@ -196,7 +208,11 @@ without ever loading the model:
   layers, a terminal sparkline (`--profile`) and an honest 1D SVG chart
   (`--svg`)
 - **secret and string scanning** over metadata, GGUF KV blocks, and sibling
-  config and tokenizer files: API keys, PEM private key blocks, suspicious URLs
+  config, tokenizer, template and adapter files (including
+  `chat_template.jinja`, where templates live now, and `adapter_config.json`):
+  Hugging Face user and organization tokens, AWS, GitHub, GitLab, Slack,
+  Docker Hub, Anthropic and Google keys, Google service account credentials,
+  PEM private key blocks, and suspicious URLs. Evidence is always redacted
 - **architectural fingerprint** derived from naming scheme, layer count, hidden
   dimension, head count, and vocabulary size, which catches a model that claims
   to be X but is structurally Y
@@ -251,6 +267,7 @@ Scan a file or a model directory.
 | `--fail-on SEVERITY` | exit non-zero at or above this severity (default `high`) |
 | `--color auto\|always\|never` | colorize output (default `auto`) |
 | `--no-progress` | disable the real-time progress display on stderr |
+| `--allow-empty` | exit `0` instead of `4` when the path holds no scannable artifact |
 | `--deep` (alias `--stats`) | inspect the weights, not just the container |
 | `--profile` | print the per-layer sparkline (implies `--deep`) |
 | `--svg FILE` | write the layer-profile chart as SVG (implies `--deep`) |
@@ -258,6 +275,15 @@ Scan a file or a model directory.
 | `--scan-tensor-entropy` | experimental: flag near-maximal-entropy integer tensor regions |
 
 Progress prints to stderr and is disabled automatically off a TTY.
+
+**How the tree is walked.** Symlinked *files* are followed, because that is
+exactly how a Hugging Face cache stores a repo: every file in a snapshot is a
+link into `blobs/`, and refusing to follow them would mean scanning nothing.
+Directories are walked through a set of canonical paths already visited, so a
+link cycle (`sub/back -> ..`) terminates instead of rescanning the same weights
+once per level. Files are deduplicated the same way: two names for one inode are
+read once, reported once, and the other paths are listed as
+`ALIASED_ARTIFACT`.
 
 ### `assay verify PATH`
 
@@ -292,10 +318,19 @@ architecture.
 | `0`  | clean, nothing at or above the threshold |
 | `1`  | findings at or above `--fail-on` severity |
 | `2`  | unreadable or malformed artifact (parse failure) |
-| `3`  | internal error, or nothing scannable at the given path |
+| `3`  | internal error, or the given path does not exist |
+| `4`  | the path exists but holds nothing scannable |
 
 Worst outcome wins: a malformed artifact anywhere in a directory scan outranks a
 high-severity finding elsewhere in it.
+
+**Why `4` and not `0`.** A scan that checked nothing is not a pass. A mistyped
+path, a glob that matched no file, a build step that moved the weights: any of
+these would otherwise turn a supply-chain gate green without a single byte
+having been verified, which is the one failure mode a gate must never have. It
+is not an error either, since nothing actually failed, so it gets its own code
+and its own line. Pipelines that scan a genuinely optional directory can pass
+`--allow-empty` to turn it back into `0`, and the finding is still reported.
 
 ---
 
@@ -324,8 +359,9 @@ $ assay scan ./models/gpt2 --deep --profile
   file: blake3:4216aebca2f4e9256cdb1e9955c1fd43c1fa179bd9e4c3c4a10bbce0a5acb213
   signature: unsigned
   [high] PICKLE_RCE_RISK: pickle artifact can execute code at load time
-      - execution opcodes: REDUCE, BUILD
-  [medium] PICKLE_TRUNCATED: pickle opcode stream ended unexpectedly or hit an unknown opcode; analysis may be incomplete
+      - stream 4/5: execution opcodes: REDUCE, BUILD
+  [info] PICKLE_TORCH_LEGACY: legacy torch container: 5 pickle stream(s) analyzed in full (bytes 0..25917); the remaining 548092160 byte(s) are the raw tensor storage payload, which carries no opcodes
+      - storage payload at file offsets 25917..548118077
   [info] SAFE_ALTERNATIVE_AVAILABLE: a safetensors artifact is present in the same repo; prefer it
 
 scanned 2 artifact(s); worst finding: high
@@ -457,8 +493,10 @@ artifact looks like.
 | ID | Severity |
 |---|---|
 | `PICKLE_RCE_RISK` | high |
+| `PICKLE_TRAILING_DATA` | high with a known file signature, otherwise medium |
 | `PICKLE_GLOBAL_REF`, `PICKLE_UNTRUSTED`, `PICKLE_TRUNCATED` | medium |
 | `PICKLE_CONTAINER_NO_PICKLE`, `PICKLE_CONTAINER_UNREADABLE` | medium |
+| `PICKLE_TORCH_LEGACY` | info |
 | `ST_OFFSET_OOB`, `ST_OFFSET_OVERLAP` | high |
 | `ST_UNREFERENCED_BYTES` | high with a known file signature, medium for other non-zero bytes, low for zero padding |
 | `ST_HEADER_MALFORMED`, `ST_DTYPE_SHAPE_MISMATCH` | medium |
@@ -468,9 +506,9 @@ artifact looks like.
 | `SIG_MISMATCH` | high |
 | `SIG_NO_MANIFEST`, `SIG_KEY_UNREADABLE`, `SIG_BUNDLE_UNREADABLE`, `SIG_UNRECOGNIZED`, `SIG_ERROR` | low |
 | `SIG_VERIFIED`, `SIG_MANIFEST_MATCH`, `SIG_NO_KEY`, `SIG_SIGSTORE_UNVERIFIED` | info |
-| `IO_ERROR` | high |
+| `IO_ERROR`, `PATH_NOT_FOUND` | high |
 | `UNKNOWN_FORMAT` | medium |
-| `SAFE_ALTERNATIVE_AVAILABLE`, `NO_ARTIFACTS` | info |
+| `SAFE_ALTERNATIVE_AVAILABLE`, `NO_ARTIFACTS`, `ALIASED_ARTIFACT` | info |
 
 **Code shipped with the weights**
 

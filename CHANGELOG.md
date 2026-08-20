@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The secret scanner knows the credentials that actually turn up in model
+  repos.** It covered AWS, GitHub, Slack, `sk-` and Google, but not `hf_`, the
+  Hugging Face user access token, which is the single most likely secret to be
+  committed to a Hugging Face repo. Added: `hf_` and `api_org_` tokens,
+  Anthropic keys (`sk-ant-`, matched before the generic `sk-` rule so they are
+  reported at high confidence), GitLab, Docker Hub, the remaining GitHub and
+  Slack prefixes, temporary AWS keys (`ASIA`), and Google service account
+  credentials, which are recognized by their JSON shape rather than a prefix.
+
+  The list of sibling files was also stuck on the old repo layout. It now reads
+  `chat_template.jinja` and `chat_template.json`, where Hugging Face puts chat
+  templates today, plus `adapter_config.json`, `preprocessor_config.json` and
+  `processor_config.json`.
+
 - **The repo's executable code is now scanned, not just its tensor
   containers.** A Hugging Face repo can ship `modeling_foo.py` and an
   `auto_map` entry in `config.json`; `from_pretrained(trust_remote_code=True)`
@@ -44,6 +58,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `file` to answer "is this the same file".
 
 ### Fixed
+
+- **`PICKLE_TRUNCATED` no longer fires on every ordinary checkpoint.** A legacy
+  `torch.save` file is not one pickle: it is five concatenated streams (magic,
+  protocol version, sys_info, the module, the storage keys) followed by the raw
+  tensor storages. The scanner read the file as a single opcode stream, ignored
+  `STOP`, and died on the first storage byte, so `models/gpt2/pytorch_model.bin`
+  and every other legacy checkpoint came back "analysis may be incomplete". A
+  warning that fires on everything is a warning nobody reads, and it hid the
+  cases where analysis really was incomplete.
+
+  `STOP` now ends a stream, the container is split into its streams, and the
+  report says exactly what was read: `PICKLE_TORCH_LEGACY` (info) names the
+  number of streams analyzed in full, the byte range they occupy, and the size
+  of the storage payload that carries no opcodes. Evidence is attributed per
+  stream, so the report tells you *which* of the five pickles carried the
+  payload. `PICKLE_TRUNCATED` now means what it says, and comes with the offset
+  where analysis stopped. Bytes stapled after the last stream are reported as
+  `PICKLE_TRAILING_DATA`, at `high` when they begin with a known file
+  signature.
+
+- **An empty path no longer reports an internal error.** `NO_ARTIFACTS` was an
+  `info` finding carrying a `Verdict::Error`, so pointing `assay` at a path with
+  nothing to scan produced exit `3` and the line `internal error`, blaming the
+  scanner for a situation in which nothing had failed.
+
+  There is now a distinct `empty` verdict and a distinct exit code `4`, with the
+  summary line reading `nothing scanned`. It stays non-zero on purpose: a scan
+  that verified nothing is not a pass, and a mistyped path silently turning a
+  gate green is the one failure mode a gate must never have. `--allow-empty`
+  brings it back to `0` for pipelines that scan an optional directory, and the
+  finding is still reported either way.
+
+  A path that does not exist at all is a different thing again, and now says so:
+  `PATH_NOT_FOUND` at `high`, exit `3`, unaffected by `--allow-empty`.
+
+- **A symlink cycle no longer multiplies the scan.** `walk()` recursed through
+  `p.is_dir()`, which follows symlinks, with no canonicalization and no
+  deduplication. A `sub/back -> ..` link made the same model be scanned once per
+  directory level until the system's ELOOP limit stopped it: 40 full rereads of
+  a 40 GB file, and a report full of duplicates. Directory recursion now goes
+  through a set of canonical paths already visited, so a cycle terminates at the
+  first repeat.
+
+  Symlinked *files* are still followed, deliberately: a Hugging Face cache
+  snapshot is nothing but links into `blobs/`, so refusing them would mean
+  scanning nothing there. Files are deduplicated by canonical path instead, so
+  two names for one inode are read once and reported once, with the other paths
+  listed as `ALIASED_ARTIFACT` (info) rather than silently dropped. The repo
+  code scanner walks the same way, which also fixes it missing an `auto_map` in
+  a cache snapshot, where `config.json` itself is a symlink.
 
 - **A payload hidden between two tensors no longer scans clean.** Validating
   that every `data_offsets` range is in bounds, ordered, and non-overlapping

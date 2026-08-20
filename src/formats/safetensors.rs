@@ -241,29 +241,6 @@ pub fn analyze(artifact_name: &str, data: &[u8]) -> ArtifactReport {
 /// cannot flood the report.
 const MAX_REPORTED_REGIONS: usize = 16;
 
-/// File signatures worth naming when they turn up in bytes nothing claims.
-const EMBEDDED_MAGICS: &[(&[u8], &str)] = &[
-    (b"\x7fELF", "an ELF executable"),
-    (b"\xfe\xed\xfa\xce", "a Mach-O executable"),
-    (b"\xfe\xed\xfa\xcf", "a Mach-O executable"),
-    (b"\xce\xfa\xed\xfe", "a Mach-O executable"),
-    (b"\xcf\xfa\xed\xfe", "a Mach-O executable"),
-    (b"\xca\xfe\xba\xbe", "a Mach-O universal binary"),
-    (b"PK\x03\x04", "a ZIP archive"),
-    (b"\x1f\x8b", "a gzip stream"),
-    (b"BZh", "a bzip2 stream"),
-    (b"\xfd7zXZ", "an xz stream"),
-    (b"7z\xbc\xaf\x27\x1c", "a 7-Zip archive"),
-    (b"%PDF-", "a PDF document"),
-    (b"\x89PNG", "a PNG image"),
-    (b"\x80\x02", "a python pickle stream"),
-    (b"\x80\x03", "a python pickle stream"),
-    (b"\x80\x04", "a python pickle stream"),
-    (b"\x80\x05", "a python pickle stream"),
-    (b"#!/", "a script shebang"),
-    (b"MZ", "a DOS/PE executable"),
-];
-
 /// Regions of the data segment that no tensor claims. `intervals` must be
 /// sorted by start offset; out-of-bounds tensors are already excluded.
 fn unreferenced_regions(intervals: &[(u64, u64, String)], data_seg_len: u64) -> Vec<(u64, u64)> {
@@ -279,29 +256,6 @@ fn unreferenced_regions(intervals: &[(u64, u64, String)], data_seg_len: u64) -> 
         regions.push((cursor, data_seg_len - cursor));
     }
     regions
-}
-
-/// Name the file format a byte run announces itself as, if any.
-fn embedded_magic(region: &[u8]) -> Option<&'static str> {
-    EMBEDDED_MAGICS
-        .iter()
-        .find(|(magic, _)| region.starts_with(magic))
-        .map(|(_, label)| *label)
-}
-
-/// A short, escaped preview of bytes we are about to report on.
-fn preview(region: &[u8]) -> String {
-    let mut out = String::new();
-    for b in region.iter().take(32) {
-        match b {
-            0x20..=0x7e => out.push(*b as char),
-            _ => out.push_str(&format!("\\x{b:02x}")),
-        }
-    }
-    if region.len() > 32 {
-        out.push('…');
-    }
-    out
 }
 
 /// Report every byte of the data segment that no tensor accounts for.
@@ -346,7 +300,7 @@ fn unreferenced_findings(
             continue;
         }
 
-        let (severity, what) = match embedded_magic(region) {
+        let (severity, what) = match crate::magic::identify(region) {
             Some(kind) => (Severity::High, format!("and begin with {kind} signature")),
             None => (Severity::Medium, "and are not zero padding".to_string()),
         };
@@ -362,7 +316,7 @@ fn unreferenced_findings(
             )
             .with_evidence(vec![
                 format!("file offsets {start}..{}", start + *len as usize),
-                format!("first bytes: {}", preview(region)),
+                format!("first bytes: {}", crate::magic::preview(region)),
             ]),
         );
     }
@@ -596,16 +550,19 @@ mod tests {
     #[test]
     fn magic_bytes_are_named() {
         assert_eq!(
-            embedded_magic(b"\x7fELF\x02\x01"),
+            crate::magic::identify(b"\x7fELF\x02\x01"),
             Some("an ELF executable")
         );
-        assert_eq!(embedded_magic(b"PK\x03\x04rest"), Some("a ZIP archive"));
         assert_eq!(
-            embedded_magic(b"\x80\x04\x95payload"),
+            crate::magic::identify(b"PK\x03\x04rest"),
+            Some("a ZIP archive")
+        );
+        assert_eq!(
+            crate::magic::identify(b"\x80\x04\x95payload"),
             Some("a python pickle stream")
         );
-        assert_eq!(embedded_magic(b"just some bytes"), None);
-        assert_eq!(embedded_magic(b""), None);
+        assert_eq!(crate::magic::identify(b"just some bytes"), None);
+        assert_eq!(crate::magic::identify(b""), None);
     }
 
     #[test]

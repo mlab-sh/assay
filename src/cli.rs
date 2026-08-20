@@ -102,6 +102,10 @@ pub struct CommonOpts {
     #[arg(long)]
     pub no_progress: bool,
 
+    /// Exit 0 instead of 4 when the path holds no scannable artifact.
+    #[arg(long)]
+    pub allow_empty: bool,
+
     // --- Phase 2: weight inspection (signals, not verdicts) ---
     /// Enable weight analysis (per-tensor stats, layer profile, …).
     #[arg(long, visible_alias = "stats")]

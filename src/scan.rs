@@ -6,6 +6,7 @@
 //! well under model size even for very large models. Both phases operate on the
 //! same `&[u8]` view.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::format::{self, Format};
@@ -34,9 +35,10 @@ pub fn run(
 
     let has_safetensors = artifacts
         .iter()
-        .any(|p| p.extension().and_then(|e| e.to_str()) == Some("safetensors"));
+        .any(|a| a.path.extension().and_then(|e| e.to_str()) == Some("safetensors"));
 
-    for (i, artifact) in artifacts.iter().enumerate() {
+    for (i, located) in artifacts.iter().enumerate() {
+        let artifact = &located.path;
         let idx = i + 1;
         let name = artifact.display().to_string();
         let size = std::fs::metadata(artifact).map(|m| m.len()).unwrap_or(0);
@@ -120,6 +122,34 @@ pub fn run(
             }
         }
 
+        // The same bytes reachable under several names: scanned once, said once.
+        if !located.aliases.is_empty() {
+            let mut evidence: Vec<String> = located
+                .aliases
+                .iter()
+                .take(MAX_LISTED_ALIASES)
+                .map(|p| p.display().to_string())
+                .collect();
+            if located.aliases.len() > MAX_LISTED_ALIASES {
+                evidence.push(format!(
+                    "and {} more",
+                    located.aliases.len() - MAX_LISTED_ALIASES
+                ));
+            }
+            ar.push(
+                Finding::new(
+                    "ALIASED_ARTIFACT",
+                    Severity::Info,
+                    format!(
+                        "the same file is reachable at {} other path(s) under the scanned \
+                         tree (symlinks or hard links); it was read once",
+                        located.aliases.len()
+                    ),
+                )
+                .with_evidence(evidence),
+            );
+        }
+
         progress.file_finished(idx, total, &name, size, ar.verdict, ar.findings.len());
         report.artifacts.push(ar);
     }
@@ -132,33 +162,91 @@ pub fn run(
     }
 
     if report.artifacts.is_empty() {
+        report.nothing_scanned = true;
         let mut ar = ArtifactReport::new(path.display().to_string(), "unknown");
-        ar.verdict = Verdict::Error;
-        ar.push(Finding::new(
-            "NO_ARTIFACTS",
-            Severity::Info,
-            "no scannable model artifacts found at the given path",
-        ));
+        if path.exists() {
+            // The path is fine, it just holds nothing we can check. Nothing
+            // failed, but nothing was verified either, and a gate must be able
+            // to tell those apart.
+            ar.verdict = Verdict::Empty;
+            ar.push(Finding::new(
+                "NO_ARTIFACTS",
+                Severity::Info,
+                "no scannable model artifacts found at the given path",
+            ));
+        } else {
+            ar.verdict = Verdict::Error;
+            ar.push(Finding::new(
+                "PATH_NOT_FOUND",
+                Severity::High,
+                "the given path does not exist, so nothing could be read",
+            ));
+        }
         report.artifacts.push(ar);
     }
 
     report
 }
 
+/// How many alias paths are listed before the rest are counted.
+const MAX_LISTED_ALIASES: usize = 5;
+
+/// One artifact to scan, plus every other path that reaches the same bytes.
+struct Located {
+    path: PathBuf,
+    aliases: Vec<PathBuf>,
+}
+
 /// Resolve a path into the list of artifact files to scan.
-fn collect_artifacts(path: &Path) -> Vec<PathBuf> {
+///
+/// Symlinked *files* are followed on purpose: that is how the Hugging Face
+/// cache stores a repo, where every file in a snapshot is a link into `blobs/`.
+/// Refusing to follow them would mean scanning nothing at all there.
+///
+/// Directories are walked through a set of canonical paths already visited, so
+/// a link cycle (`sub/back -> ../..`) terminates instead of rescanning the same
+/// weights once per level, and files are deduplicated the same way, so two
+/// names for one inode are read once and reported once.
+fn collect_artifacts(path: &Path) -> Vec<Located> {
     if path.is_file() {
-        return vec![path.to_path_buf()];
+        return vec![Located {
+            path: path.to_path_buf(),
+            aliases: Vec::new(),
+        }];
     }
-    let mut out = Vec::new();
-    if path.is_dir() {
-        walk(path, &mut out);
-        out.sort();
+    if !path.is_dir() {
+        return Vec::new();
+    }
+
+    let mut found = Vec::new();
+    let mut visited_dirs = HashSet::new();
+    walk(path, &mut found, &mut visited_dirs);
+    // Sorted first, so which path becomes the canonical one is deterministic.
+    found.sort();
+
+    let mut out: Vec<Located> = Vec::new();
+    let mut index: HashMap<PathBuf, usize> = HashMap::new();
+    for p in found {
+        let key = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+        match index.get(&key) {
+            Some(&i) => out[i].aliases.push(p),
+            None => {
+                index.insert(key, out.len());
+                out.push(Located {
+                    path: p,
+                    aliases: Vec::new(),
+                });
+            }
+        }
     }
     out
 }
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+fn walk(dir: &Path, out: &mut Vec<PathBuf>, visited: &mut HashSet<PathBuf>) {
+    let key = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if !visited.insert(key) {
+        return; // already walked: a link cycle, or two names for one directory
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -166,7 +254,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
-            walk(&p, out);
+            walk(&p, out, visited);
         } else if format::is_candidate_artifact(&p) {
             out.push(p);
         }
@@ -230,12 +318,16 @@ mod tests {
         ar.findings.iter().map(|f| f.id.as_str()).collect()
     }
 
+    fn paths(located: &[Located]) -> Vec<PathBuf> {
+        located.iter().map(|l| l.path.clone()).collect()
+    }
+
     #[test]
     fn a_file_path_resolves_to_exactly_that_file() {
         let dir = tmpdir("single");
         let p = write(&dir, "model.safetensors", &safetensors_bytes());
         write(&dir, "other.safetensors", &safetensors_bytes());
-        assert_eq!(collect_artifacts(&p), vec![p]);
+        assert_eq!(paths(&collect_artifacts(&p)), vec![p]);
     }
 
     #[test]
@@ -249,7 +341,7 @@ mod tests {
         write(&dir, "config.json", b"{}");
         write(&dir, "tokenizer.json", b"{}");
 
-        let found = collect_artifacts(&dir);
+        let found = paths(&collect_artifacts(&dir));
         let names: Vec<String> = found
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
@@ -265,13 +357,27 @@ mod tests {
     }
 
     #[test]
-    fn a_path_with_nothing_scannable_reports_no_artifacts() {
+    fn a_path_with_nothing_scannable_is_empty_not_an_error() {
         let dir = tmpdir("empty");
         write(&dir, "README.md", b"# hi");
         let report = run_scan(&dir);
         assert_eq!(report.artifacts.len(), 1);
-        assert_eq!(report.artifacts[0].verdict, Verdict::Error);
+        assert_eq!(report.artifacts[0].verdict, Verdict::Empty);
         assert_eq!(ids(&report.artifacts[0]), vec!["NO_ARTIFACTS"]);
+        // Nothing failed, but nothing was verified, so this is not a pass.
+        assert_eq!(report.exit_code(Severity::High, false), 4);
+        assert_eq!(report.exit_code(Severity::High, true), 0);
+    }
+
+    #[test]
+    fn a_path_that_does_not_exist_is_an_error_not_an_empty_scan() {
+        let dir = tmpdir("missing");
+        let report = run_scan(&dir.join("nope").join("model.safetensors"));
+        assert_eq!(report.artifacts[0].verdict, Verdict::Error);
+        assert_eq!(ids(&report.artifacts[0]), vec!["PATH_NOT_FOUND"]);
+        assert_eq!(report.exit_code(Severity::High, false), 3);
+        // Not something --allow-empty should paper over.
+        assert_eq!(report.exit_code(Severity::High, true), 3);
     }
 
     #[test]
@@ -382,6 +488,83 @@ mod tests {
             run_scan(&a).artifacts[0].hashes.file,
             run_scan(&b).artifacts[0].hashes.file
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Symlinks: followed where it matters, never walked in circles
+    // -----------------------------------------------------------------
+
+    /// `sub/back -> ..` used to make the same weights be scanned once per
+    /// level, up to the system's ELOOP limit.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_cycle_scans_each_artifact_once() {
+        let dir = tmpdir("cycle");
+        write(&dir, "model.safetensors", &safetensors_bytes());
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("sub").join("back")).unwrap();
+
+        let found = collect_artifacts(&dir);
+        assert_eq!(found.len(), 1, "got {:?}", paths(&found));
+
+        let report = run_scan(&dir);
+        assert_eq!(
+            report.artifacts.len(),
+            1,
+            "the report must not repeat itself"
+        );
+    }
+
+    /// A Hugging Face snapshot is a directory of links into `blobs/`. Refusing
+    /// to follow file symlinks would mean scanning nothing there.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_weights_file_is_followed() {
+        let dir = tmpdir("hfcache");
+        let blobs = dir.join("blobs");
+        let snapshot = dir.join("snapshots").join("abc123");
+        std::fs::create_dir_all(&blobs).unwrap();
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(blobs.join("deadbeef"), safetensors_bytes()).unwrap();
+        std::os::unix::fs::symlink(blobs.join("deadbeef"), snapshot.join("model.safetensors"))
+            .unwrap();
+
+        let report = run_scan(&snapshot);
+        assert_eq!(report.artifacts.len(), 1);
+        assert_eq!(report.artifacts[0].format, "safetensors");
+        assert!(report.artifacts[0].hashes.manifest.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn two_names_for_one_file_are_read_once_and_reported_as_aliases() {
+        let dir = tmpdir("aliases");
+        let real = write(&dir, "model.safetensors", &safetensors_bytes());
+        std::os::unix::fs::symlink(&real, dir.join("also.safetensors")).unwrap();
+        std::os::unix::fs::symlink(&real, dir.join("copy.pt")).unwrap();
+
+        let found = collect_artifacts(&dir);
+        assert_eq!(found.len(), 1, "one inode, one scan: {:?}", paths(&found));
+        assert_eq!(found[0].aliases.len(), 2);
+
+        let report = run_scan(&dir);
+        let a = &report.artifacts[0];
+        let alias = a
+            .findings
+            .iter()
+            .find(|f| f.id == "ALIASED_ARTIFACT")
+            .expect("alias finding");
+        assert_eq!(alias.severity, Severity::Info);
+        assert_eq!(alias.evidence.len(), 2);
+        assert!(alias.detail.contains("2 other path(s)"), "{}", alias.detail);
+    }
+
+    #[test]
+    fn a_plain_directory_reports_no_aliases() {
+        let dir = tmpdir("noalias");
+        write(&dir, "model.safetensors", &safetensors_bytes());
+        let report = run_scan(&dir);
+        assert!(!ids(&report.artifacts[0]).contains(&"ALIASED_ARTIFACT"));
     }
 
     #[test]

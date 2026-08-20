@@ -1037,3 +1037,163 @@ fn a_repo_without_custom_code_is_unaffected() {
     assert!(p.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The B4 regression: a symlink cycle used to make the same model be scanned
+/// once per directory level, up to the system's ELOOP limit.
+#[cfg(unix)]
+#[test]
+fn a_symlink_cycle_does_not_multiply_the_report() {
+    let dir = tmpdir("cycle");
+    write(
+        &dir,
+        "model.safetensors",
+        &safetensors_f32(&[("model.layers.0.w", vec![1.0, 2.0])]),
+    );
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let _ = std::fs::remove_file(dir.join("sub").join("back"));
+    std::os::unix::fs::symlink(&dir, dir.join("sub").join("back")).unwrap();
+
+    let (code, out) = run(&["scan", dir.to_str().unwrap(), "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    // A single artifact object, not a wrapper full of duplicates.
+    assert_eq!(
+        v["format"], "safetensors",
+        "expected exactly one artifact:\n{out}"
+    );
+    assert_eq!(out.matches("\"artifact\"").count(), 1, "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ===========================================================================
+// Nothing to scan: loud, but honest about what happened
+// ===========================================================================
+
+/// The B5 regression: an empty path used to exit 3 and print "internal error",
+/// blaming the scanner for a situation in which nothing had failed.
+#[test]
+fn a_path_with_nothing_to_scan_exits_four_not_three() {
+    let dir = tmpdir("empty-path");
+    write(&dir, "README.md", b"# just docs here");
+
+    let (code, out) = run(&["scan", dir.to_str().unwrap()]);
+    assert_eq!(code, 4, "an empty scan has its own exit code\n{out}");
+    assert!(out.contains("NO_ARTIFACTS"), "{out}");
+    assert!(out.contains("nothing scanned"), "{out}");
+    assert!(!out.contains("internal error"), "nothing failed:\n{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// It must stay non-zero by default: a mistyped path turning a supply-chain
+/// gate green is the one outcome a gate may never produce.
+#[test]
+fn an_empty_scan_is_opt_in_to_pass() {
+    let dir = tmpdir("empty-allow");
+    write(&dir, "README.md", b"# just docs here");
+
+    let (code, out) = run(&["scan", dir.to_str().unwrap(), "--allow-empty"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("NO_ARTIFACTS"), "still reported:\n{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_missing_path_is_reported_as_missing() {
+    let dir = tmpdir("missing-path");
+    let missing = dir.join("nope").join("model.safetensors");
+
+    let (code, out) = run(&["scan", missing.to_str().unwrap()]);
+    assert_eq!(code, 3, "{out}");
+    assert!(out.contains("PATH_NOT_FOUND"), "{out}");
+    // --allow-empty is about empty directories, not about typos.
+    let (code, _out) = run(&["scan", missing.to_str().unwrap(), "--allow-empty"]);
+    assert_eq!(code, 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ===========================================================================
+// Legacy torch containers: five pickles, then tensor payload
+// ===========================================================================
+
+/// The layout `torch.save` writes without zip serialization. `models/gpt2`
+/// ships exactly this, and it used to come back "analysis may be incomplete".
+fn legacy_torch_container(payload: &[u8]) -> Vec<u8> {
+    const TORCH_MAGIC_LE: [u8; 10] = [0x6c, 0xfc, 0x9c, 0x46, 0xf9, 0x20, 0x6a, 0xa8, 0x50, 0x19];
+    let mut out = vec![0x80, 0x02, 0x8a, 0x0a];
+    out.extend_from_slice(&TORCH_MAGIC_LE);
+    out.push(b'.');
+    out.extend_from_slice(&[0x80, 0x02, 0x4d, 0xe9, 0x03, b'.']);
+    out.extend_from_slice(&[0x80, 0x02, b'}', b'.']);
+    out.extend_from_slice(&os_system_pickle());
+    out.extend_from_slice(&[0x80, 0x02, b']', b'.']);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// The B6 regression: an ordinary legacy checkpoint claimed to be truncated.
+#[test]
+fn a_legacy_checkpoint_is_described_not_called_truncated() {
+    let dir = tmpdir("legacy");
+    let p = write(
+        &dir,
+        "pytorch_model.bin",
+        &legacy_torch_container(&[0x42; 8192]),
+    );
+
+    let (code, out) = run(&["scan", p.to_str().unwrap(), "--fail-on", "high"]);
+    assert_eq!(code, 1, "the payload in stream 4 is still caught\n{out}");
+    assert!(!out.contains("PICKLE_TRUNCATED"), "false alarm:\n{out}");
+    assert!(out.contains("PICKLE_TORCH_LEGACY"), "{out}");
+    assert!(out.contains("5 pickle stream(s)"), "{out}");
+    assert!(out.contains("8192 byte(s)"), "{out}");
+    // And it says which of the five streams carried the payload.
+    assert!(out.contains("stream 4/5"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_payload_stapled_to_a_checkpoint_is_caught() {
+    let dir = tmpdir("stapled");
+    let mut data = legacy_torch_container(&[0x42; 512]);
+    data.extend_from_slice(b"PK\x03\x04");
+    data.extend_from_slice(&[0x41; 256]);
+    // A zip magic in the middle of tensor bytes would be indistinguishable, so
+    // this only reads as trailing data because the tail begins with it.
+    let mut clean = legacy_torch_container(&[0x42; 512]);
+    clean.extend_from_slice(&[0x42; 256]);
+
+    let p = write(&dir, "pytorch_model.bin", &data);
+    let (_code, out) = run(&["scan", p.to_str().unwrap()]);
+    assert!(out.contains("PICKLE_TORCH_LEGACY"), "{out}");
+    let _ = std::fs::write(&p, &clean);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The B7 regression: the token most likely to appear in a model repo.
+#[test]
+fn a_hugging_face_token_in_a_sibling_config_is_found() {
+    let dir = tmpdir("hf-token");
+    write(
+        &dir,
+        "model.safetensors",
+        &safetensors_f32(&[("model.layers.0.w", vec![1.0, 2.0])]),
+    );
+    // Assembled at run time: a token-shaped literal in the source would be
+    // picked up by push protection and by secret scanners, including ours.
+    // Nothing here is a real credential.
+    let token = format!("{}{}", "hf", "_QGxKmPvRtWyZaBcDeFgHiJkLmNoPqRsTuV");
+    write(
+        &dir,
+        "chat_template.jinja",
+        format!("{{{{ messages }}}} token {token}").as_bytes(),
+    );
+
+    let (code, out) = run(&["scan", dir.to_str().unwrap(), "--deep", "--fail-on", "high"]);
+    assert_eq!(code, 1, "a leaked token must fail the gate\n{out}");
+    assert!(out.contains("EMBEDDED_SECRET"), "{out}");
+    assert!(out.contains("Hugging Face user access token"), "{out}");
+    assert!(out.contains("chat_template.jinja"), "{out}");
+    // The token itself is redacted in the evidence.
+    assert!(!out.contains(&token), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

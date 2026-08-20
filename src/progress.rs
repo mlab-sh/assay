@@ -68,6 +68,8 @@ impl Progress {
             Verdict::Untrusted => self.untrusted += 1,
             Verdict::Malformed => self.malformed += 1,
             Verdict::Error => self.error += 1,
+            // Never reported per file: it describes a scan that found nothing.
+            Verdict::Empty => {}
         }
         if !self.enabled {
             return;
