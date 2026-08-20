@@ -12,7 +12,8 @@
 you just downloaded:
 
 1. **Is this file what it claims to be?** (provenance and integrity)
-2. **Does loading it put my machine at risk?** (format-level safety)
+2. **Does loading it put my machine at risk?** (format-level safety, and the
+   code the repo would have your loader execute)
 
 A downloaded model is a multi-gigabyte opaque blob that people execute with
 total trust. We would never do that with a random `.exe`. `assay` applies the
@@ -94,6 +95,37 @@ can run arbitrary code the moment you load it. `assay`:
   `STACK_GLOBAL`, imports of `os` / `subprocess` / `builtins`, and friends)
 - looks inside torch zip containers rather than stopping at the archive
 - tells you when a clean `safetensors` equivalent sits in the same repo
+
+### Code shipped with the weights
+
+Weights cannot execute. The files next to them can, and that is now the most
+direct execution path in the ecosystem. A repo can ship `modeling_foo.py` plus
+an `auto_map` entry in `config.json`; `from_pretrained(trust_remote_code=True)`
+imports that module, which runs everything at its top level before a single
+tensor is read. A scanner that only opens tensor containers never sees it.
+
+So `assay` reports the repo, not just the weights. Every `.py` alongside a model
+becomes an artifact with its own verdict and its own file hash, and the configs
+are read to find out which of them a loader would actually execute:
+
+- `REMOTE_CODE_AUTO_MAP`: this file is wired to a loader entry point, so
+  importing the model runs it
+- `REMOTE_CODE_EXTERNAL`: the mapping points at *another repo*
+  (`org/name--module.Class`), so loading downloads and executes code this repo
+  does not even contain
+- `REMOTE_CODE_UNRESOLVED`: the mapping names a module that is not here
+- `REMOTE_CODE_PRESENT`: code ships with the weights and nothing points at it,
+  which is not an alarm but is worth knowing
+- `PY_DANGEROUS_CALL`: shell execution, subprocess, `eval`/`exec`, dynamic
+  imports, pickle and marshal loading, network calls, native memory. Scored
+  `high` at module level, because that runs on import, and `medium` inside a
+  function body. Reported with the line number and the line
+- `PY_OBFUSCATION`: large encoded blobs and long hex-escape runs, which is how a
+  payload avoids being read
+
+Matching is call-aware, so ordinary torch code (`model.eval()`,
+`torch.compile()`) is not mistaken for `eval(` and `compile(`. Symlinks out of
+the repo are not followed: what gets judged is the repo itself.
 
 ### safetensors structural validation
 
@@ -439,6 +471,15 @@ artifact looks like.
 | `IO_ERROR` | high |
 | `UNKNOWN_FORMAT` | medium |
 | `SAFE_ALTERNATIVE_AVAILABLE`, `NO_ARTIFACTS` | info |
+
+**Code shipped with the weights**
+
+| ID | Severity |
+|---|---|
+| `REMOTE_CODE_AUTO_MAP`, `REMOTE_CODE_EXTERNAL` | high |
+| `PY_DANGEROUS_CALL` | high at module level, medium inside a function |
+| `REMOTE_CODE_UNRESOLVED`, `PY_OBFUSCATION`, `PY_NOT_READ` | medium |
+| `REMOTE_CODE_PRESENT` | low |
 
 **Weight signals (`--deep`)**
 

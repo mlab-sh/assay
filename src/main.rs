@@ -16,6 +16,7 @@ mod numeric;
 mod phase2;
 mod profile;
 mod progress;
+mod remote_code;
 mod report;
 mod scan;
 mod secrets;

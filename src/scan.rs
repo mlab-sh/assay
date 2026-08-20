@@ -125,6 +125,12 @@ pub fn run(
     }
     progress.finish();
 
+    // Repo level: weights cannot execute, but the code shipped next to them
+    // can, and a loader will run it before it reads a single tensor.
+    for ar in crate::remote_code::scan(path) {
+        report.artifacts.push(ar);
+    }
+
     if report.artifacts.is_empty() {
         let mut ar = ArtifactReport::new(path.display().to_string(), "unknown");
         ar.verdict = Verdict::Error;

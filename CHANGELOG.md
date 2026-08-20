@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The repo's executable code is now scanned, not just its tensor
+  containers.** A Hugging Face repo can ship `modeling_foo.py` and an
+  `auto_map` entry in `config.json`; `from_pretrained(trust_remote_code=True)`
+  imports that module and runs everything at its top level before reading a
+  single weight. It is the most direct execution path in the current ecosystem
+  and `assay` did not look at it at all.
+
+  Every `.py` shipped alongside a model is now an artifact with its own verdict
+  and file hash, and the config files are parsed to find which of them a loader
+  would execute (`auto_map` in `config.json`, `tokenizer_config.json`,
+  preprocessor and processor configs, plus `custom_pipelines`, in both the
+  string and the two-element list form). New findings:
+  `REMOTE_CODE_AUTO_MAP` (this file is wired to a loader entry point),
+  `REMOTE_CODE_EXTERNAL` (the mapping points at another repo, so loading pulls
+  code this repo does not contain), `REMOTE_CODE_UNRESOLVED`,
+  `REMOTE_CODE_PRESENT`, `PY_DANGEROUS_CALL` and `PY_OBFUSCATION`.
+
+  Dangerous constructs are reported with their line and scored by when they
+  run: `high` at module level, because that executes on import, `medium` inside
+  a function body. Matching is call-aware, so `model.eval()` and
+  `torch.compile()` are not mistaken for `eval(` and `compile(`. Symlinks
+  pointing out of the repo are not followed. A repo with no custom code
+  produces no extra reports.
+
 - **A whole-file digest, `hashes.file`, next to the manifest hash.** The
   manifest hash covers tensor identity and content only, which is what makes it
   survive renaming and repacking, but it also means two different files can
