@@ -1,10 +1,10 @@
 //! GGUF block-quantization decoders.
 //!
-//! GGUF quantized tensors store *encoded* weights in fixed-size blocks — the
+//! GGUF quantized tensors store *encoded* weights in fixed-size blocks; the
 //! raw bytes are not the weights, so computing stats on them directly would be
 //! garbage. We dequantize the common **legacy** block formats (Q4_0, Q4_1,
 //! Q5_0, Q5_1, Q8_0) for real per-weight stats. The **k-quant** family
-//! (Q*_K) and exotic IQ types are intentionally deferred for now — their
+//! (Q*_K) and exotic IQ types are intentionally deferred for now, because their
 //! decoders are subtle and shipping a wrong one would produce misleading
 //! numbers. Phase 3 will build on this module to add them.
 //!

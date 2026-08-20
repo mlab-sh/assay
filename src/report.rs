@@ -81,7 +81,7 @@ impl Finding {
 pub enum Verdict {
     /// No findings at/above an actionable severity.
     Clean,
-    /// Can run code / carries unreviewed injection surface — handle with care.
+    /// Can run code / carries unreviewed injection surface; handle with care.
     Untrusted,
     /// Could not be parsed as the format it claims to be.
     Malformed,

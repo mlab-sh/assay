@@ -1,7 +1,7 @@
 //! GGUF metadata sanity + offset validation.
 //!
 //! GGUF carries no executable code, but its metadata can smuggle a Jinja2 chat
-//! template — a code-ish injection surface — so we surface those for human
+//! template, a code-ish injection surface, so we surface those for human
 //! review rather than silently trusting them. We also validate the magic,
 //! version, and that every tensor's data offset stays within the file.
 
@@ -137,7 +137,7 @@ fn parse(data: &[u8], report: &mut ArtifactReport) -> Result<(), String> {
                 Finding::new(
                     "GGUF_CHAT_TEMPLATE",
                     Severity::Low,
-                    "embedded chat template present — review before trusting (Jinja2 \
+                    "embedded chat template present; review before trusting (Jinja2 \
                      templates are an injection surface)",
                 )
                 .with_evidence(vec![format!("{key}: {snippet}")]),

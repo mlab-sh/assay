@@ -1,4 +1,4 @@
-//! Pickle / arbitrary-code-execution risk scanner — the highest-priority check.
+//! Pickle / arbitrary-code-execution risk scanner: the highest-priority check.
 //!
 //! We **never execute** the pickle. We walk the opcode stream statically,
 //! resolving global references and noting the opcodes that actually invoke a
@@ -85,7 +85,7 @@ struct StreamScan {
 /// Analyze a pickle artifact (raw stream or torch zip container).
 pub fn analyze(artifact_name: &str, data: &[u8]) -> ArtifactReport {
     let mut report = ArtifactReport::new(artifact_name, "pickle");
-    // A pickle artifact can run code at load time by design — never clean.
+    // A pickle artifact can run code at load time by design, so it is never clean.
     report.verdict = Verdict::Untrusted;
 
     let mut scans: Vec<(String, StreamScan)> = Vec::new();

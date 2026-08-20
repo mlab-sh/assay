@@ -2,7 +2,7 @@
 """Derive a tampered gpt2 from a clean safetensors file by scaling exactly one
 MLP tensor in one layer, leaving every other tensor byte-identical.
 
-Pure standard library (no torch / numpy / safetensors needed) — it edits the
+Pure standard library (no torch / numpy / safetensors needed); it edits the
 raw F32 bytes in place. Used to produce a fixture for `assay compare`:
 
     python make_tampered_gpt2.py ./models/gpt2/model.safetensors \

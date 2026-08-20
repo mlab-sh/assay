@@ -1,10 +1,10 @@
-//! `compare SUBJECT BASELINE` — differential weight analysis.
+//! `compare SUBJECT BASELINE`: differential weight analysis.
 //!
 //! The diagnostic signal for tampering is not a weight's absolute value but how
 //! the subject **differs from a known-good reference** of the same architecture.
 //! Identical models → silence. A localized tamper → it lights up exactly where
 //! the tamper is, and nowhere else. Like Phase 2 these are **signals, not
-//! verdicts** — the one near-verdict-grade exception is structural divergence
+//! verdicts**. The one near-verdict-grade exception is structural divergence
 //! (a tensor present in one model but not the other, or a shape mismatch).
 //!
 //! Streaming: both files are mmap'd and processed one matched tensor pair at a
@@ -355,7 +355,7 @@ pub fn run(subject: &Path, baseline: &Path, opts: &CompareOpts) -> CompareReport
                 "ARCH_MISMATCH",
                 Severity::High,
                 format!(
-                    "subject ({}, {} layers) and baseline ({}, {} layers) are different architectures — \
+                    "subject ({}, {} layers) and baseline ({}, {} layers) are different architectures; \
                      cross-architecture weight drift is meaningless; pass --force to compare anyway",
                     arch.subject,
                     fp_s.layer_count.unwrap_or(0),
@@ -644,7 +644,7 @@ fn build_layer_drift(
                     "LAYER_DRIFT_OUTLIER",
                     severity,
                     format!(
-                        "layer {layer} drift is a concentrated outlier (rel_l2={rel:.3}, {mads:.1} MADs above the cross-layer drift level) — worth a human look, not a verdict"
+                        "layer {layer} drift is a concentrated outlier (rel_l2={rel:.3}, {mads:.1} MADs above the cross-layer drift level); worth a human look, not a verdict"
                     ),
                 )
                 .with_evidence(vec![format!("dominant tensor: {dom}")]),
@@ -700,7 +700,7 @@ fn tie_finding(missing_key: &str, side_map: &BTreeMap<String, T>, missing_t: &T,
                     "TIED_WEIGHT",
                     Severity::Info,
                     format!(
-                        "'{}' is tied to '{}' (weight tying) — a serialization convention, not a divergence",
+                        "'{}' is tied to '{}'; weight tying is a serialization convention, not a divergence",
                         missing_t.name, ct.name
                     ),
                 )
@@ -812,7 +812,7 @@ pub fn render_svg(r: &CompareReport) -> String {
         .filter_map(|(i, p)| p.anomaly.as_ref().map(|a| (i, a.mads)))
         .collect();
     crate::profile::render::svg_values(
-        &format!("assay drift profile — rel_l2 ({} layers)", r.layer_drift.len()),
+        &format!("assay drift profile: rel_l2 ({} layers)", r.layer_drift.len()),
         &values,
         &anomalous,
     )

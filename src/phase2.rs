@@ -1,5 +1,5 @@
 //! Phase 2 orchestrator: weight inspection. Produces **signals with scores and
-//! severities, never verdicts** — a high score means "anomalous, worth a human
+//! severities, never verdicts**. A high score means "anomalous, worth a human
 //! look", never "malicious". Phase 1 verdicts are untouched.
 
 use std::path::Path;
@@ -49,7 +49,7 @@ fn nan_inf_finding(s: &PerTensorStats) -> Option<Finding> {
                 "WEIGHT_NAN_INF",
                 Severity::High,
                 format!(
-                    "tensor '{}' contains {} NaN and {} Inf values — weights should never contain these (corruption or tampering)",
+                    "tensor '{}' contains {} NaN and {} Inf values; weights should never contain these (corruption or tampering)",
                     s.name,
                     s.nan_count.unwrap_or(0),
                     s.inf_count.unwrap_or(0)
@@ -249,7 +249,7 @@ fn run_gguf(data: &[u8], artifact_path: &Path, opts: &Phase2Opts) -> Phase2Resul
 // ---------------------------------------------------------------------------
 
 fn tensor_entropy_finding(name: &str, dtype: &str, raw: &[u8]) -> Option<Finding> {
-    // Only meaningful for integer/byte tensors — float weights are naturally
+    // Only meaningful for integer/byte tensors; float weights are naturally
     // high-entropy and would false-positive constantly.
     let intish = matches!(dtype, "I8" | "U8" | "BOOL" | "I16" | "I32" | "I64");
     if !intish || raw.len() < 1024 {
@@ -262,7 +262,7 @@ fn tensor_entropy_finding(name: &str, dtype: &str, raw: &[u8]) -> Option<Finding
                 "TENSOR_ENTROPY_ANOMALY",
                 Severity::Info,
                 format!(
-                    "[experimental] tensor '{name}' ({dtype}) has near-maximal byte entropy ({h:.2}/8) — \
+                    "[experimental] tensor '{name}' ({dtype}) has near-maximal byte entropy ({h:.2}/8); \
                      possible packed/smuggled data; high false-positive rate"
                 ),
             )

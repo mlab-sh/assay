@@ -103,7 +103,7 @@ impl Progress {
         let breakdown = if parts.is_empty() {
             String::new()
         } else {
-            format!(" — {}", parts.join(", "))
+            format!(": {}", parts.join(", "))
         };
         eprintln!(
             "{} {} artifact(s){}, {} in {}",

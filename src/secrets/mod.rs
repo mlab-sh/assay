@@ -1,7 +1,7 @@
-//! 2c — secret & string scanning over metadata, GGUF KV blocks, and sibling
+//! Secret & string scanning over metadata, GGUF KV blocks, and sibling
 //! config/tokenizer files. Extends the Phase 1 chat-template flag into a
 //! general scan. Plus an **experimental, opt-in** high-entropy tensor-region
-//! check (noisy by nature — gated behind a flag and clearly labeled).
+//! check (noisy by nature, so it is gated behind a flag and clearly labeled).
 
 use std::path::Path;
 

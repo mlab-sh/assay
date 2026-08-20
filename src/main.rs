@@ -1,4 +1,4 @@
-//! `assay` — offline-first scanner for ML model artifacts.
+//! `assay`: offline-first scanner for ML model artifacts.
 //!
 //! Entry point: parse args, run the scan (streaming progress to stderr), render
 //! the report (colorized on stdout), optionally render the Phase 2 layer

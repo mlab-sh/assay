@@ -1,4 +1,4 @@
-//! 2a — per-tensor streaming statistics.
+//! Per-tensor streaming statistics.
 //!
 //! Given a way to stream a tensor's values (a `run_pass` closure that can be
 //! invoked more than once), compute integrity + distribution stats in O(1)
@@ -74,7 +74,7 @@ pub struct PerTensorStats {
 }
 
 impl PerTensorStats {
-    /// Build a deferred (no real stats) result — used for k-quant GGUF tensors.
+    /// Build a deferred (no real stats) result, used for k-quant GGUF tensors.
     pub fn deferred(meta: TensorMeta) -> Self {
         PerTensorStats {
             name: meta.name,

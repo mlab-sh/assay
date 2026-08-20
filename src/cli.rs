@@ -10,7 +10,7 @@ use crate::report::Severity;
 #[command(
     name = "assay",
     version,
-    about = "Assay the weights before you trust them — scan ML model artifacts for supply-chain safety.",
+    about = "Assay the weights before you trust them. Scan ML model artifacts for supply-chain safety.",
     long_about = None
 )]
 pub struct Cli {
@@ -103,7 +103,7 @@ pub struct CommonOpts {
     pub no_progress: bool,
 
     // --- Phase 2: weight inspection (signals, not verdicts) ---
-    /// Enable Phase 2 weight analysis (per-tensor stats, layer profile, …).
+    /// Enable weight analysis (per-tensor stats, layer profile, …).
     #[arg(long, visible_alias = "stats")]
     pub deep: bool,
 

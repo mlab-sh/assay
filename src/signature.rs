@@ -1,4 +1,4 @@
-//! Signature / provenance verification — the honest Phase-1 subset.
+//! Signature / provenance verification: the honest subset.
 //!
 //! We verify only what can be verified offline and with high confidence:
 //!   * an OpenSSF model-transparency style manifest that records the expected
@@ -8,7 +8,7 @@
 //!
 //! Full Sigstore / cosign verification (Fulcio certificate chain + Rekor
 //! transparency log) is **not** implemented yet. When we see such a bundle we
-//! say so plainly rather than implying trust — per the README's "honest
+//! say so plainly rather than implying trust. Per the README's "honest
 //! confidence" principle, `signed` is only ever reported on a real pass.
 
 use std::path::{Path, PathBuf};
@@ -35,10 +35,10 @@ impl SignatureOutcome {
 
 /// Evaluate signature material for an artifact.
 ///
-/// * `computed_manifest` — the manifest hash `assay` computed (`blake3:…`).
-/// * `bundle` — explicit bundle/signature path (from `verify --bundle`), else
+/// * `computed_manifest`: the manifest hash `assay` computed (`blake3:…`).
+/// * `bundle`: explicit bundle/signature path (from `verify --bundle`), else
 ///   we auto-detect common sidecars next to the artifact.
-/// * `key` — explicit ed25519 public-key path (from `verify --key`).
+/// * `key`: explicit ed25519 public-key path (from `verify --key`).
 pub fn evaluate(
     artifact_path: &Path,
     computed_manifest: Option<&str>,
@@ -73,7 +73,7 @@ pub fn evaluate(
         if let Some(expected) = json.get("manifest").and_then(|v| v.as_str()) {
             return verify_transparency(expected, computed_manifest, &display);
         }
-        // JSON we don't recognize — be honest.
+        // JSON we don't recognize; be honest.
         return SignatureOutcome {
             status: "unverified".into(),
             findings: vec![Finding::new(

@@ -1,6 +1,6 @@
 //! Rendering for layer profiles and drift profiles: a terminal sparkline and a
-//! faithful 1D SVG line chart. The SVG is deliberately 1D — a per-layer line,
-//! not a deforming 2D→3D projection — so it can't imply structure that isn't
+//! faithful 1D SVG line chart. The SVG is deliberately 1D, a per-layer line,
+//! not a deforming 2D→3D projection, so it can't imply structure that isn't
 //! there. The core renderers take plain value arrays so both the Phase 2 layer
 //! profile and the `compare` drift profile reuse them.
 
@@ -150,7 +150,7 @@ pub fn svg(points: &[ProfilePoint], metric: &str) -> String {
         .filter_map(|(i, p)| p.anomaly.as_ref().map(|a| (i, a.mads)))
         .collect();
     svg_values(
-        &format!("assay layer profile — {metric} ({} layers)", points.len()),
+        &format!("assay layer profile: {metric} ({} layers)", points.len()),
         &values,
         &anomalous,
     )

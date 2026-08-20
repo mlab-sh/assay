@@ -1,9 +1,9 @@
-//! 2d — architectural fingerprint.
+//! Architectural fingerprint.
 //!
 //! Derive a cheap structural signature (naming scheme, layer count, hidden dim,
 //! heads, vocab) and compare it against the declared identity. Catches
 //! "claims to be X but is structurally Y" masked-repackaging. Heuristic by
-//! nature — emits the detected family as info, and `ARCH_MISMATCH` only on a
+//! nature: emits the detected family as info, and `ARCH_MISMATCH` only on a
 //! clear naming-scheme/declared-architecture contradiction.
 
 use serde::Serialize;
@@ -106,7 +106,7 @@ pub fn analyze(input: &FpInput) -> (Fingerprint, Vec<Finding>) {
                     Severity::Medium,
                     format!(
                         "declared architecture '{declared}' disagrees with the structural \
-                         signature ({scheme}) — possible masked repackaging"
+                         signature ({scheme}); possible masked repackaging"
                     ),
                 )
                 .with_evidence(vec![format!(

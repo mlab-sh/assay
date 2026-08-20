@@ -11,7 +11,7 @@ pip install -U huggingface_hub   # for the `hf` downloader (curl works too)
 
 ---
 
-## 1. The clean / dirty contrast — `gpt2`
+## 1. The clean / dirty contrast (`gpt2`)
 
 `gpt2` is the perfect first target: the same repo ships **both** a modern
 `safetensors` file **and** a legacy pickle (`pytorch_model.bin`). One is safe by
@@ -23,14 +23,14 @@ assay scan ./gpt2/
 ```
 
 **What you should see:** `model.safetensors` comes back clean, while
-`pytorch_model.bin` is flagged `untrusted` for pickle/RCE risk — plus an info
+`pytorch_model.bin` is flagged `untrusted` for pickle/RCE risk, plus an info
 note that a safe alternative exists in the same repo. That single line is the
 whole pitch: *you were one `torch.load` away from running someone else's code,
 and you had a clean file sitting right next to it.*
 
 ---
 
-## 2. A clean modern model — safetensors only
+## 2. A clean modern model: safetensors only
 
 ```sh
 hf download sentence-transformers/all-MiniLM-L6-v2 --local-dir ./minilm
@@ -42,7 +42,7 @@ pin in CI. This is what "boring and trustworthy" looks like.
 
 ---
 
-## 3. A GGUF model — the local-inference format
+## 3. A GGUF model: the local-inference format
 
 The format everyone actually runs on their laptop via llama.cpp / Ollama.
 
@@ -52,7 +52,7 @@ hf download Qwen/Qwen2.5-0.5B-Instruct-GGUF \
 assay scan ./qwen-gguf/qwen2.5-0.5b-instruct-q4_k_m.gguf
 ```
 
-`assay` validates the GGUF structure and offsets, and — importantly — surfaces
+`assay` validates the GGUF structure and offsets, and, importantly, surfaces
 any **embedded chat template** for review instead of silently trusting it.
 GGUF can't execute code, but a Jinja template smuggled in metadata is still a
 surface worth a human glance.
@@ -62,8 +62,8 @@ surface worth a human glance.
 ## 4. Self-test: prove the pickle scanner actually fires
 
 Like the EICAR file for antivirus, you should be able to verify detection on
-demand with a **harmless** fixture. This pickle runs a benign `echo` — nothing
-destructive — and exists only to confirm `assay` flags it.
+demand with a **harmless** fixture. This pickle runs a benign `echo`, nothing
+destructive, and exists only to confirm `assay` flags it.
 
 ```sh
 python3 - <<'PY'
@@ -81,7 +81,7 @@ assay scan ./selftest.pkl --fail-on high ; echo "exit=$?"
 
 **What you should see:** a `PICKLE_RCE_RISK` finding pointing at the
 `os.system` reduce, and a non-zero exit. If you get exit `0` here, the scanner
-is broken — that's the point of the self-test. Delete it after:
+is broken; that's the point of the self-test. Delete it after:
 
 ```sh
 rm selftest.pkl
@@ -108,7 +108,7 @@ Phase 1 is provenance & integrity. It catches the lazy attacker: pickle
 payloads, malformed containers, unsigned weights, identity drift. It does **not**
 yet detect a backdoor hidden in the weights, and it does **not** yet catch a
 payload that only wakes up after GGUF quantization (that's Phase 3, and it's
-hard on purpose). `assay` will always tell you the confidence of a finding — it
+hard on purpose). `assay` will always tell you the confidence of a finding; it
 never claims to catch what it can't.
 
 Found a model `assay` should have flagged and didn't? That's the best possible

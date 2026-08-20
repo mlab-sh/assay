@@ -1,6 +1,6 @@
 # `assay` for dummies 🧪
 
-> The complete, illustrated guide to how `assay` works — from the first byte read
+> The complete, illustrated guide to how `assay` works, from the first byte read
 > to the drift graph. No prerequisites: everything is explained.
 
 ---
@@ -27,7 +27,7 @@ Two questions, two halves:
 │     (format-level safety)                                        │
 │                                                                   │
 │  3. Are the weights themselves anomalous?            → PHASE 2   │
-│     (statistical analysis, SIGNALS — never verdicts)            │
+│     (statistical analysis, SIGNALS, never verdicts)             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -99,7 +99,7 @@ or with `--no-progress`):
 ```
 [1/2] model.safetensors CLEAN no findings (0ms)
 [2/2] pytorch_model.bin UNTRUSTED 2 finding(s) (1ms)
-✓ scanned 2 artifact(s) — 1 clean, 1 untrusted, 3.8 MiB in 2ms
+✓ scanned 2 artifact(s): 1 clean, 1 untrusted, 3.8 MiB in 2ms
 ```
 
 > **Why stderr?** So `assay scan … --json | jq` stays **clean**: the report goes
@@ -107,7 +107,7 @@ or with `--no-progress`):
 
 ---
 
-## 2. PHASE 1 — Provenance & integrity (verdicts)
+## 2. PHASE 1: Provenance & integrity (verdicts)
 
 Phase 1 is **always on**. It produces deterministic, high-confidence **VERDICTS**.
 No fuzzy statistics: either a pickle can execute code, or it can't.
@@ -127,7 +127,7 @@ ERROR      ❌  internal error (I/O, etc.)
 ┌──────┬──────────────────────────────────────────────┐
 │ code │ meaning                                       │
 ├──────┼──────────────────────────────────────────────┤
-│  0   │ clean — nothing at/above the --fail-on level  │
+│  0   │ clean, nothing at/above the --fail-on level   │
 │  1   │ findings at/above --fail-on severity          │
 │  2   │ unreadable / malformed artifact (parse fail)  │
 │  3   │ internal error                                 │
@@ -144,7 +144,7 @@ assay scan ./models/ --json --fail-on high | tee report.json
 
 ---
 
-### 2.1 — Format detection (refuses to guess)
+### 2.1 Format detection (refuses to guess)
 
 We look at the **head bytes**, not just the extension:
 
@@ -163,7 +163,7 @@ otherwise                 →  unknown → MALFORMED
 
 ---
 
-### 2.2 — Pickle / code-execution risk ⚡ (priority #1)
+### 2.2 Pickle / code-execution risk ⚡ (priority #1)
 
 **The problem.** Python's pickle format can **execute arbitrary code at load
 time** (`torch.load`). That's exactly why `safetensors` exists. A `.bin`/`.pt`/
@@ -195,7 +195,7 @@ NEWOBJ / BUILD
 "Dangerous" modules flagged: `os`, `posix`, `subprocess`, `sys`, `socket`,
 `shutil`, `ctypes`, `builtins.eval/exec/__import__`, …
 
-**Example — the EICAR-style self-test** (a benign pickle that runs `echo`):
+**Example: the EICAR-style self-test** (a benign pickle that runs `echo`):
 
 ```sh
 python3 - <<'PY'
@@ -238,7 +238,7 @@ Pickle findings:
 
 ---
 
-### 2.3 — safetensors structural validation
+### 2.3 safetensors structural validation
 
 `safetensors` is **safe by design** (no code), but still has format-level attack
 surface: overlapping or out-of-bounds offsets → out-of-bounds reads / DoS at
@@ -279,10 +279,10 @@ tensor B :       [2 ─────── 6]        ← B starts before A ends
 
 ---
 
-### 2.4 — GGUF sanity + chat-template flagging
+### 2.4 GGUF sanity + chat-template flagging
 
 GGUF (the llama.cpp / Ollama format) carries **no executable code**… but its
-metadata can embed a **Jinja2 template** (`tokenizer.chat_template`) — a
+metadata can embed a **Jinja2 template** (`tokenizer.chat_template`), a
 "code-ish" injection surface.
 
 **GGUF anatomy:**
@@ -306,7 +306,7 @@ Example:
 
 ```
 model.gguf  [gguf]  -> CLEAN
-  [low] GGUF_CHAT_TEMPLATE: embedded chat template present — review before trusting
+  [low] GGUF_CHAT_TEMPLATE: embedded chat template present; review before trusting
       - tokenizer.chat_template: {{ messages }}…
 ```
 
@@ -314,7 +314,7 @@ model.gguf  [gguf]  -> CLEAN
 
 ---
 
-### 2.5 — Deterministic hashing (the provenance anchor)
+### 2.5 Deterministic hashing (the provenance anchor)
 
 For `safetensors`, `assay` computes:
 
@@ -328,7 +328,7 @@ For `safetensors`, `assay` computes:
 ┌───────────────────────────────────────────────────────────┐
 │  The manifest hash is STABLE:                             │
 │  renaming the file or repacking the archive does NOT      │
-│  change it — it depends only on tensor identity + content.│
+│  change it: it depends only on tensor identity + content. │
 │  This is your anchor to pin a model in CI.                │
 └───────────────────────────────────────────────────────────┘
 ```
@@ -339,7 +339,7 @@ For `safetensors`, `assay` computes:
 
 ---
 
-### 2.6 — Signature verification (the honest subset)
+### 2.6 Signature verification (the honest subset)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -370,11 +370,11 @@ model.safetensors  [safetensors]  -> CLEAN
 
 ---
 
-## 3. PHASE 2 — Weight inspection (`--deep`)
+## 3. PHASE 2: Weight inspection (`--deep`)
 
 ```
         ╔══════════════════════════════════════════════════════╗
-        ║  MINDSET SHIFT — read this twice                      ║
+        ║  MINDSET SHIFT: read this twice                       ║
         ║                                                        ║
         ║  Phase 1 has external truth ("pickle = dangerous").   ║
         ║  Phase 2 inspects the WEIGHTS: there is NO external    ║
@@ -400,7 +400,7 @@ assay scan ./model/ --deep --mad-k 5.0  # tune the anomaly threshold
 
 ---
 
-### 3.1 — 2a: Per-tensor statistics (the foundation)
+### 3.1 Per-tensor statistics (2a, the foundation)
 
 For each tensor, in a **single streaming pass** (online algorithms, f64
 accumulators, never the whole tensor in RAM):
@@ -440,7 +440,7 @@ JSON (excerpt):
 
 ---
 
-### 3.2 — 2b: Per-layer profile + robust anomaly detection
+### 3.2 Per-layer profile + robust anomaly detection (2b)
 
 We **group tensors into layers** by reading their names:
 
@@ -453,7 +453,7 @@ blk.<N>.…            (GGUF)
 Per layer we aggregate: `l2` (combined norm), `mean_kurtosis`, `max_abs`,
 `params`, `sparsity`.
 
-**Anomaly detection — why MEDIAN + MAD and not mean + std?**
+**Anomaly detection: why MEDIAN + MAD and not mean + std?**
 
 ```
    Data: 9 normal layers + 1 tampered layer (huge)
@@ -474,7 +474,7 @@ Per layer we aggregate: `l2` (combined norm), `mean_kurtosis`, `max_abs`,
 Finding: `WEIGHT_OUTLIER_LAYER` (low/medium by magnitude), carrying the layer
 index, the metric, and the deviation in MADs.
 
-**The sparkline** (with `--profile`) — each block = one layer, red = anomalous:
+**The sparkline** (with `--profile`): each block = one layer, red = anomalous:
 
 ```
 layer profile ▁▂▁▁▁▁▂▂▂▂▃▃▃▃▄▄▄▄▄▄▅▅▆▆▇██  (28 layers, metric=l2)
@@ -486,7 +486,7 @@ layer profile ▁▂▁▁▁▁▂▂▂▂▃▃▃▃▄▄▄▄▄▄▅▅
 
 ---
 
-### 3.3 — 2c: Secret & string scanning
+### 3.3 Secret & string scanning (2c)
 
 Extends the chat-template flag into a general scan of metadata, GGUF KV blocks,
 and sibling `config.json` / `tokenizer*.json` files:
@@ -510,7 +510,7 @@ Real example (mradermacher GGUFs embed the source URL):
 
 ---
 
-### 3.4 — 2d: Architectural fingerprint
+### 3.4 Architectural fingerprint (2d)
 
 Derives a structural signature (naming scheme, layer count, hidden dim, heads,
 vocab) and compares it to the declared identity:
@@ -527,7 +527,7 @@ ARCH_MISMATCH  (medium) → "claims to be X but is structurally Y" (masked repac
 
 ---
 
-### 3.5 — Quantized GGUF note (important)
+### 3.5 Quantized GGUF note (important)
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -558,7 +558,7 @@ A legacy block (e.g. Q4_0, 32 weights):
 
 ---
 
-## 4. The `compare` command — differential analysis
+## 4. The `compare` command: differential analysis
 
 ```
         ╔══════════════════════════════════════════════════════╗
@@ -567,7 +567,7 @@ A legacy block (e.g. Q4_0, 32 weights):
         ║  trained transformer is naturally non-uniform).       ║
         ║                                                        ║
         ║  The real tampering signal is not a weight's absolute  ║
-        ║  value — it is HOW this model DIFFERS from a known-    ║
+        ║  value: it is HOW this model DIFFERS from a known-     ║
         ║  good reference of the same architecture.              ║
         ╚══════════════════════════════════════════════════════╝
 ```
@@ -595,7 +595,7 @@ changed_frac  = fraction of elements |Δ| > --epsilon
 
 ### The 4 steps
 
-**1. Align by name — with canonicalization.** Same architecture, named
+**1. Align by name, with canonicalization.** Same architecture, named
 differently depending on how it was saved:
 
 ```
@@ -655,7 +655,7 @@ $ assay compare ./tampered ./gpt2
   [high] TENSOR_DRIFT: tensor 'h.5.mlp.c_fc.weight' dominates the drift of layer 5
 ```
 
-> Layers 3 and 11 — the ones the profile **alone** falsely flagged — stay
+> Layers 3 and 11, the ones the profile **alone** falsely flagged, stay
 > **silent** here: they don't move vs the baseline. *That's the whole point of
 > the diff.*
 
@@ -734,5 +734,5 @@ Phase 3  🔬  GGUF quantization-error differential         ── research
 ---
 
 *Everything is offline, in a single binary. No model is ever loaded or executed.
-Verdicts are deterministic; signals are honest about their confidence — `assay`
+Verdicts are deterministic; signals are honest about their confidence, and `assay`
 never claims to detect what it can't.*

@@ -1,5 +1,5 @@
 //! Format detection. We sniff magic bytes first and treat the file extension
-//! only as a hint — `assay` refuses to guess when the bytes disagree.
+//! only as a hint; `assay` refuses to guess when the bytes disagree.
 
 use std::path::Path;
 
@@ -22,7 +22,7 @@ pub fn detect(path: &Path, head: &[u8]) -> Format {
         return Format::Gguf;
     }
 
-    // Torch containers are zip archives — treat as pickle (we look inside later).
+    // Torch containers are zip archives, so treat them as pickle (we look inside later).
     if head.len() >= 4 && &head[0..4] == ZIP_MAGIC {
         return Format::Pickle;
     }

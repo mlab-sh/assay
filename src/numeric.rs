@@ -1,6 +1,6 @@
 //! Numeric dtype model + cold byte → f64 value streaming.
 //!
-//! Phase 2 reads tensor data **cold** — it reinterprets raw bytes as numbers
+//! Phase 2 reads tensor data **cold**: it reinterprets raw bytes as numbers
 //! without ever loading a framework. This module knows the element layout of
 //! every non-quantized dtype we support (both safetensors and GGUF) and yields
 //! values one at a time so callers can accumulate stats in O(1) memory.

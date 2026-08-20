@@ -1,4 +1,4 @@
-//! 2b — layer profile + robust (median/MAD) anomaly detection.
+//! Layer profile + robust (median/MAD) anomaly detection.
 //!
 //! Tensors are bucketed into layers by parsing their names. For each layer we
 //! aggregate the 2a per-tensor stats into a profile point, then flag layers
@@ -182,7 +182,7 @@ fn detect_anomalies(points: &mut [ProfilePoint], mad_k: f64) -> Vec<Finding> {
                     "WEIGHT_OUTLIER_LAYER",
                     sev,
                     format!(
-                        "layer {} is anomalous on {} ({:.1} MADs from the cross-layer median) — \
+                        "layer {} is anomalous on {} ({:.1} MADs from the cross-layer median); \
                          worth a human look, not a verdict",
                         p.layer, a.metric, a.mads
                     ),

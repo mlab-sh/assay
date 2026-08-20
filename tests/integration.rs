@@ -156,7 +156,7 @@ fn deep_nan_triggers_weight_nan_inf() {
 }
 
 /// Acceptance #3: scale exactly one layer ~100×; only that layer is flagged
-/// WEIGHT_OUTLIER_LAYER (validates MAD robustness — the tamper must not raise
+/// WEIGHT_OUTLIER_LAYER (validates MAD robustness: the tamper must not raise
 /// the threshold enough to hide itself).
 #[test]
 fn deep_tampered_layer_is_isolated() {
@@ -295,7 +295,7 @@ fn compare_identity_is_silent() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// compare #2: the money test — scale one layer; only that layer is flagged.
+/// compare #2: the money test. Scale one layer; only that layer is flagged.
 #[test]
 fn compare_isolates_tampered_layer() {
     let dir = tmpdir("cmp-tamper");
