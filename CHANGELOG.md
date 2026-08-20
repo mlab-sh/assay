@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Byte accounting now covers GGUF as well as safetensors.** The invariant is
+  the same: every byte of the file belongs to the header, to a declared tensor,
+  or to the alignment padding the format requires, and anything else is a
+  storage channel nobody reads. Tensor sizes are computed from the ggml type
+  and shape, which the parser previously read and discarded.
+
+  It comes with a safety valve, because the size table is knowledge about ggml
+  rather than something the file states. The layouts of `Q8_1` and the `IQ`
+  family have moved between ggml versions, so they are marked unknown instead
+  of guessed. And the table is cross-checked against the file: if the computed
+  sizes contradict the declared offsets anywhere, the report emits
+  `GGUF_ACCOUNTING_INCOMPLETE` (info) and reports no unaccounted bytes at all,
+  rather than blaming a file for a table that might be wrong.
+
 - **The secret scanner knows the credentials that actually turn up in model
   repos.** It covered AWS, GitHub, Slack, `sk-` and Google, but not `hf_`, the
   Hugging Face user access token, which is the single most likely secret to be
@@ -58,6 +72,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `file` to answer "is this the same file".
 
 ### Fixed
+
+- **A GGUF file with an out-of-bounds tensor offset was reported as CLEAN.**
+  `GGUF_OFFSET_OOB` set the verdict to `untrusted` inside the parser, and the
+  caller then overwrote it with `clean` on the way out, so a high-severity
+  structural finding sat next to a clean verdict. The verdict the parser
+  reached is now kept.
 
 - **`PICKLE_TRUNCATED` no longer fires on every ordinary checkpoint.** A legacy
   `torch.save` file is not one pickle: it is five concatenated streams (magic,

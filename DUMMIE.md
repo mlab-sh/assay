@@ -437,6 +437,45 @@ model.gguf  [gguf]  -> CLEAN
 
 ---
 
+### 2.4b Byte accounting in GGUF
+
+The same invariant as 2.3, on the format people actually run locally. GGUF
+declares only a *start* offset per tensor, so the size has to be computed from
+the ggml type and the shape:
+
+```
+info block │ pad │ tensor a │pad│ tensor b │ ??? │ tensor c │  tail?
+───────────┴─────┴──────────┴───┴──────────┴─────┴──────────┴────────
+           ▲     ▲              ▲                ▲
+           │     │              │                └─ claimed by nobody
+           │     │              └─ < alignment, zero-filled: the padding
+           │     │                 the format requires, not reported
+           │     └─ data_start = align_up(end of info block, alignment)
+           └─ everything left of here was parsed field by field
+```
+
+**The safety valve.** Those sizes come from a table of ggml type layouts, which
+is knowledge about ggml, not something the file states. Get one entry wrong and
+every model using that type lights up red. So:
+
+- `Q8_1` and the `IQ` family are marked **unknown** rather than guessed. Their
+  layouts have moved between ggml versions.
+- The table is **cross-checked against the file**. If any computed size runs
+  into the next tensor's offset, one of the two is wrong, and `assay` does not
+  assume it is the file:
+
+```
+[info] GGUF_ACCOUNTING_INCOMPLETE: computed tensor sizes contradict the declared
+       offsets for 3 of 291 tensors, so byte accounting is not reliable for this
+       file and unaccounted bytes are not reported
+```
+
+An admission is worth more than a confident lie. The rule for the rest is the
+same as safetensors: a known file signature raises it to `high`, other non-zero
+bytes are `medium`, and zero padding beyond what the alignment needs is `low`.
+
+---
+
 ### 2.5 Deterministic hashing (the provenance anchor)
 
 For `safetensors`, `assay` computes:

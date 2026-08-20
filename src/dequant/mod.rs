@@ -87,6 +87,46 @@ pub fn classify(type_id: u32) -> (&'static str, GgmlClass) {
     }
 }
 
+/// Storage layout of a ggml tensor type: `(elements per block, bytes per
+/// block)`. `None` means we do not know the layout with certainty, and the
+/// caller must not pretend to account for those bytes.
+///
+/// Every entry here is cross-checked against the file before it is used to
+/// accuse anyone: if the declared tensor offsets contradict these sizes, the
+/// accounting reports itself as unreliable rather than inventing findings.
+pub fn type_layout(type_id: u32) -> Option<(u64, u64)> {
+    Some(match type_id {
+        0 => (1, 4),  // F32
+        1 => (1, 2),  // F16
+        24 => (1, 1), // I8
+        25 => (1, 2), // I16
+        26 => (1, 4), // I32
+        27 => (1, 8), // I64
+        28 => (1, 8), // F64
+        30 => (1, 2), // BF16
+
+        // Legacy blocks, sizes shared with `QuantKind::block_size`.
+        2 => (QK as u64, 2 + QK as u64 / 2),         // Q4_0
+        3 => (QK as u64, 2 + 2 + QK as u64 / 2),     // Q4_1
+        6 => (QK as u64, 2 + 4 + QK as u64 / 2),     // Q5_0
+        7 => (QK as u64, 2 + 2 + 4 + QK as u64 / 2), // Q5_1
+        8 => (QK as u64, 2 + QK as u64),             // Q8_0
+
+        // k-quants: QK_K = 256 weights per super-block.
+        10 => (256, 84),  // Q2_K
+        11 => (256, 110), // Q3_K
+        12 => (256, 144), // Q4_K
+        13 => (256, 176), // Q5_K
+        14 => (256, 210), // Q6_K
+        15 => (256, 292), // Q8_K
+
+        // Q8_1 and the IQ family: deliberately unknown. Their layouts have
+        // moved between ggml versions, and a wrong size here would produce
+        // confident nonsense.
+        _ => return None,
+    })
+}
+
 fn rd_f16(b: &[u8], off: usize) -> f32 {
     f16_to_f32(u16::from_le_bytes([b[off], b[off + 1]]))
 }
@@ -173,6 +213,37 @@ pub fn stream_quant(kind: QuantKind, raw: &[u8], n_elements: u64, mut f: impl Fn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_layouts_match_the_decoder_block_sizes() {
+        for (id, kind) in [
+            (2u32, QuantKind::Q4_0),
+            (3, QuantKind::Q4_1),
+            (6, QuantKind::Q5_0),
+            (7, QuantKind::Q5_1),
+            (8, QuantKind::Q8_0),
+        ] {
+            let (blck, bytes) = type_layout(id).expect("legacy layout");
+            assert_eq!(blck, BLOCK_ELEMS as u64, "type {id}");
+            assert_eq!(bytes, kind.block_size() as u64, "type {id}");
+        }
+    }
+
+    #[test]
+    fn plain_layouts_match_their_scalar_width() {
+        assert_eq!(type_layout(0), Some((1, 4))); // F32
+        assert_eq!(type_layout(1), Some((1, 2))); // F16
+        assert_eq!(type_layout(28), Some((1, 8))); // F64
+    }
+
+    #[test]
+    fn uncertain_layouts_are_not_guessed() {
+        assert_eq!(type_layout(9), None, "Q8_1 has moved between versions");
+        for iq in 16..=23u32 {
+            assert_eq!(type_layout(iq), None, "IQ type {iq}");
+        }
+        assert_eq!(type_layout(9999), None, "unknown id");
+    }
 
     #[test]
     fn q8_0_roundtrip() {

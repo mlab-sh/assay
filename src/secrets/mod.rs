@@ -49,8 +49,9 @@ pub fn scan(strings: &[(String, String)], artifact_dir: Option<&Path>) -> Vec<Fi
         }
     }
 
-    findings
-        .sort_by(|a, b| (a.id.clone(), a.detail.clone()).cmp(&(b.id.clone(), b.detail.clone())));
+    // Sorted for a deterministic report. Compared field by field rather than
+    // through a cloned key tuple, so ordering costs no allocations.
+    findings.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.detail.cmp(&b.detail)));
     findings.dedup_by(|a, b| a.id == b.id && a.detail == b.detail);
     findings
 }

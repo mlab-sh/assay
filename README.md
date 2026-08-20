@@ -153,9 +153,9 @@ The format is safe by design, but the container still has attack surface
   pack tensors contiguously and unclaimed bytes are a storage channel the format
   cannot explain (`ST_UNREFERENCED_BYTES`)
 
-That last check matters more than it sounds. A file whose offsets are all valid
-can still carry an arbitrary payload in the hole between two tensors, or after
-the last one. No loader reads those bytes, they never appear in a tensor, and
+That last check matters more than it sounds, and it applies to GGUF too. A file
+whose offsets are all valid can still carry an arbitrary payload in the hole
+between two tensors, or after the last one. No loader reads those bytes, they never appear in a tensor, and
 the manifest hash does not cover them, so the file looks pristine everywhere
 else. `assay` names the region, shows the first bytes, and recognizes the
 signature when the payload announces itself (ELF, Mach-O, PE, ZIP, gzip, xz,
@@ -170,6 +170,18 @@ template, which is a code-ish injection surface. `assay`:
 - checks that every tensor offset lands inside the file
 - surfaces embedded chat templates for human review instead of silently
   trusting them
+- **accounts for every byte**, as it does for `safetensors`: each tensor's size
+  is computed from its ggml type and shape, the alignment padding the format
+  requires is recognized as such, and anything left over is reported with its
+  offsets and a preview (`GGUF_UNREFERENCED_BYTES`)
+
+That last check has a safety valve. Tensor sizes come from the ggml type table,
+and `assay` refuses to trust it blindly: the layouts of `Q8_1` and the `IQ`
+family have moved between ggml versions, so they are marked unknown rather than
+guessed, and if the computed sizes contradict the declared offsets anywhere in
+the file, the report says the accounting is unreliable
+(`GGUF_ACCOUNTING_INCOMPLETE`, info) instead of inventing findings. An
+admission is worth more than a confident lie.
 
 ### Deterministic hashing
 
@@ -502,7 +514,9 @@ artifact looks like.
 | `ST_HEADER_MALFORMED`, `ST_DTYPE_SHAPE_MISMATCH` | medium |
 | `ST_DTYPE_UNKNOWN` | low |
 | `GGUF_PARSE_ERROR`, `GGUF_BAD_VERSION`, `GGUF_OFFSET_OOB` | high |
+| `GGUF_UNREFERENCED_BYTES` | high with a known file signature, medium for other non-padding bytes, low for excess zero padding |
 | `GGUF_CHAT_TEMPLATE` | low |
+| `GGUF_ACCOUNTING_INCOMPLETE` | info |
 | `SIG_MISMATCH` | high |
 | `SIG_NO_MANIFEST`, `SIG_KEY_UNREADABLE`, `SIG_BUNDLE_UNREADABLE`, `SIG_UNRECOGNIZED`, `SIG_ERROR` | low |
 | `SIG_VERIFIED`, `SIG_MANIFEST_MATCH`, `SIG_NO_KEY`, `SIG_SIGSTORE_UNVERIFIED` | info |
