@@ -145,8 +145,11 @@ fn summarize(report: &mut ArtifactReport, scans: &[(String, StreamScan)]) {
             if g.is_dangerous() {
                 any_dangerous = true;
                 if dangerous_evidence.len() < EVIDENCE_CAP {
-                    dangerous_evidence
-                        .push(format!("{prefix}opcode {} -> {}", g.opcode, g.qualified()));
+                    dangerous_evidence.push(format!(
+                        "{prefix}opcode {} -> {}",
+                        g.opcode,
+                        g.qualified()
+                    ));
                 }
             }
         }
@@ -158,10 +161,7 @@ fn summarize(report: &mut ArtifactReport, scans: &[(String, StreamScan)]) {
             }
         }
         if !seen.is_empty() && exec_evidence.len() < EVIDENCE_CAP {
-            exec_evidence.push(format!(
-                "{prefix}execution opcodes: {}",
-                seen.join(", ")
-            ));
+            exec_evidence.push(format!("{prefix}execution opcodes: {}", seen.join(", ")));
         }
     }
 
@@ -430,7 +430,7 @@ mod tests {
         p.push(0x80); // PROTO
         p.push(0x02);
         p.extend_from_slice(b"cos\nsystem\n"); // GLOBAL os system
-        // short binstring arg
+                                               // short binstring arg
         p.push(b'U');
         let arg = b"echo hi";
         p.push(arg.len() as u8);

@@ -80,3 +80,103 @@ pub fn is_candidate_artifact(path: &Path) -> bool {
         Some("safetensors" | "gguf" | "bin" | "pt" | "pth" | "ckpt" | "pkl" | "pickle")
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    fn st_head(header_len: u64) -> Vec<u8> {
+        let mut v = header_len.to_le_bytes().to_vec();
+        v.push(b'{');
+        v
+    }
+
+    #[test]
+    fn magic_beats_extension() {
+        // A GGUF file misnamed `.bin` is GGUF: bytes win over the extension.
+        assert_eq!(detect(&p("model.bin"), b"GGUF\x03\0\0\0"), Format::Gguf);
+        // A pickle stream misnamed `.safetensors` is still pickle.
+        assert_eq!(
+            detect(&p("model.safetensors"), b"\x80\x02X"),
+            Format::Pickle
+        );
+    }
+
+    #[test]
+    fn zip_container_is_pickle() {
+        assert_eq!(
+            detect(&p("pytorch_model.bin"), b"PK\x03\x04rest"),
+            Format::Pickle
+        );
+    }
+
+    #[test]
+    fn extension_is_the_fallback_hint() {
+        // Bytes say nothing; the extension decides, and the parser checks later.
+        assert_eq!(
+            detect(&p("model.safetensors"), b"\0\0\0\0"),
+            Format::Safetensors
+        );
+        assert_eq!(detect(&p("model.gguf"), b"\0\0\0\0"), Format::Gguf);
+        for ext in ["bin", "pt", "pth", "ckpt", "pkl", "pickle"] {
+            assert_eq!(
+                detect(&p(&format!("model.{ext}")), b"\0\0\0\0"),
+                Format::Pickle,
+                "extension {ext}"
+            );
+        }
+    }
+
+    #[test]
+    fn headerless_safetensors_shape_is_recognized() {
+        // No extension at all, but the u64 length prefix + `{` is unambiguous.
+        assert_eq!(detect(&p("weights"), &st_head(120)), Format::Safetensors);
+        // Implausible header length is not enough to claim safetensors.
+        assert_eq!(detect(&p("weights"), &st_head(0)), Format::Unknown);
+        assert_eq!(detect(&p("weights"), &st_head(1 << 40)), Format::Unknown);
+    }
+
+    #[test]
+    fn refuses_to_guess() {
+        assert_eq!(detect(&p("README.md"), b"# hello"), Format::Unknown);
+        assert_eq!(detect(&p("noext"), b""), Format::Unknown);
+    }
+
+    #[test]
+    fn candidate_artifacts_are_model_files_only() {
+        for name in [
+            "model.safetensors",
+            "model.gguf",
+            "pytorch_model.bin",
+            "w.pt",
+            "w.pth",
+            "w.ckpt",
+            "w.pkl",
+            "w.pickle",
+        ] {
+            assert!(is_candidate_artifact(&p(name)), "{name} should be scanned");
+        }
+        for name in [
+            "README.md",
+            "config.json",
+            "tokenizer.json",
+            "vocab.txt",
+            "model.onnx",
+            "tf_model.h5",
+            "noext",
+        ] {
+            assert!(!is_candidate_artifact(&p(name)), "{name} should be skipped");
+        }
+    }
+
+    #[test]
+    fn candidate_extension_match_is_case_insensitive() {
+        assert!(is_candidate_artifact(&p("MODEL.SAFETENSORS")));
+        assert!(is_candidate_artifact(&p("Model.GGUF")));
+    }
+}

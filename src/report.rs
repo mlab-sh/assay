@@ -175,7 +175,9 @@ pub struct ScanReport {
 
 impl ScanReport {
     pub fn any_malformed(&self) -> bool {
-        self.artifacts.iter().any(|a| a.verdict == Verdict::Malformed)
+        self.artifacts
+            .iter()
+            .any(|a| a.verdict == Verdict::Malformed)
     }
 
     pub fn any_error(&self) -> bool {
@@ -208,8 +210,7 @@ impl ScanReport {
             serde_json::to_string_pretty(&self.artifacts[0])
                 .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
         } else {
-            serde_json::to_string_pretty(self)
-                .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
+            serde_json::to_string_pretty(self).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
         }
     }
 
@@ -225,7 +226,11 @@ impl ScanReport {
                 styler.verdict(a.verdict),
             ));
             if let Some(m) = &a.hashes.manifest {
-                out.push_str(&format!("  {} {}\n", styler.dim("manifest:"), styler.dim(m)));
+                out.push_str(&format!(
+                    "  {} {}\n",
+                    styler.dim("manifest:"),
+                    styler.dim(m)
+                ));
             }
             out.push_str(&format!("  {} {}\n", styler.dim("signature:"), a.signature));
             for f in &a.findings {
@@ -253,5 +258,152 @@ impl ScanReport {
             summary
         ));
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn artifact(verdict: Verdict, findings: &[(&str, Severity)]) -> ArtifactReport {
+        let mut a = ArtifactReport::new("m.safetensors", "safetensors");
+        a.verdict = verdict;
+        for (id, sev) in findings {
+            a.push(Finding::new(id, *sev, "detail"));
+        }
+        a
+    }
+
+    fn scan(artifacts: Vec<ArtifactReport>) -> ScanReport {
+        ScanReport { artifacts }
+    }
+
+    #[test]
+    fn severity_orders_from_info_to_critical() {
+        assert!(Severity::Info < Severity::Low);
+        assert!(Severity::Low < Severity::Medium);
+        assert!(Severity::Medium < Severity::High);
+        assert!(Severity::High < Severity::Critical);
+    }
+
+    #[test]
+    fn severity_parses_case_and_space_insensitively() {
+        assert_eq!("  HIGH ".parse::<Severity>().unwrap(), Severity::High);
+        assert_eq!("info".parse::<Severity>().unwrap(), Severity::Info);
+        assert!("bogus".parse::<Severity>().is_err());
+    }
+
+    #[test]
+    fn exit_code_respects_the_fail_on_threshold() {
+        let r = scan(vec![artifact(Verdict::Clean, &[("X", Severity::Medium)])]);
+        assert_eq!(r.exit_code(Severity::High), 0);
+        assert_eq!(r.exit_code(Severity::Medium), 1);
+        assert_eq!(r.exit_code(Severity::Low), 1);
+    }
+
+    #[test]
+    fn exit_code_precedence_is_error_then_malformed_then_findings() {
+        let clean = scan(vec![artifact(Verdict::Clean, &[("I", Severity::Info)])]);
+        assert_eq!(clean.exit_code(Severity::High), 0);
+
+        let flagged = scan(vec![artifact(Verdict::Untrusted, &[("H", Severity::High)])]);
+        assert_eq!(flagged.exit_code(Severity::High), 1);
+
+        // A malformed artifact outranks a high finding elsewhere in the scan.
+        let malformed = scan(vec![
+            artifact(Verdict::Untrusted, &[("H", Severity::High)]),
+            artifact(Verdict::Malformed, &[("M", Severity::Medium)]),
+        ]);
+        assert_eq!(malformed.exit_code(Severity::High), 2);
+
+        // An internal error outranks everything.
+        let errored = scan(vec![
+            artifact(Verdict::Malformed, &[("M", Severity::Medium)]),
+            artifact(Verdict::Error, &[("IO_ERROR", Severity::High)]),
+        ]);
+        assert_eq!(errored.exit_code(Severity::High), 3);
+    }
+
+    #[test]
+    fn max_severity_is_the_worst_across_all_artifacts() {
+        let r = scan(vec![
+            artifact(Verdict::Clean, &[("A", Severity::Low)]),
+            artifact(
+                Verdict::Untrusted,
+                &[("B", Severity::High), ("C", Severity::Info)],
+            ),
+        ]);
+        assert_eq!(r.max_severity(), Some(Severity::High));
+        assert_eq!(
+            scan(vec![artifact(Verdict::Clean, &[])]).max_severity(),
+            None
+        );
+    }
+
+    #[test]
+    fn single_artifact_json_is_the_bare_object() {
+        let r = scan(vec![artifact(
+            Verdict::Untrusted,
+            &[("PICKLE_RCE_RISK", Severity::High)],
+        )]);
+        let v: serde_json::Value = serde_json::from_str(&r.to_json()).unwrap();
+        assert_eq!(v["artifact"], "m.safetensors");
+        assert_eq!(v["verdict"], "untrusted");
+        assert_eq!(v["findings"][0]["id"], "PICKLE_RCE_RISK");
+        assert_eq!(v["findings"][0]["severity"], "high");
+        assert_eq!(v["signature"], "unsigned");
+        assert!(v.get("artifacts").is_none());
+    }
+
+    #[test]
+    fn multi_artifact_json_is_wrapped() {
+        let r = scan(vec![
+            artifact(Verdict::Clean, &[]),
+            artifact(Verdict::Untrusted, &[("X", Severity::High)]),
+        ]);
+        let v: serde_json::Value = serde_json::from_str(&r.to_json()).unwrap();
+        assert_eq!(v["artifacts"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn empty_optional_blocks_are_omitted_from_json() {
+        let r = scan(vec![artifact(Verdict::Clean, &[("X", Severity::Info)])]);
+        let v: serde_json::Value = serde_json::from_str(&r.to_json()).unwrap();
+        // No evidence, no hashes, and none of the weight-analysis blocks.
+        assert!(v["findings"][0].get("evidence").is_none());
+        assert!(v.get("hashes").is_none());
+        assert!(v.get("stats").is_none());
+        assert!(v.get("layer_profile").is_none());
+        assert!(v.get("fingerprint").is_none());
+    }
+
+    #[test]
+    fn evidence_is_serialized_when_present() {
+        let mut a = ArtifactReport::new("m.bin", "pickle");
+        a.push(Finding::new("X", Severity::High, "d").with_evidence(vec!["opcode REDUCE".into()]));
+        let v: serde_json::Value = serde_json::from_str(&scan(vec![a]).to_json()).unwrap();
+        assert_eq!(v["findings"][0]["evidence"][0], "opcode REDUCE");
+    }
+
+    #[test]
+    fn human_report_lists_every_finding_and_a_summary() {
+        let styler = crate::style::Styler::new(false);
+        let r = scan(vec![artifact(
+            Verdict::Untrusted,
+            &[("A", Severity::High), ("B", Severity::Info)],
+        )]);
+        let out = r.to_human(&styler);
+        assert!(out.contains("m.safetensors"));
+        assert!(out.contains("[safetensors]"));
+        assert!(out.contains("[high] A: detail"));
+        assert!(out.contains("[info] B: detail"));
+        assert!(out.contains("scanned 1 artifact(s); worst finding: high"));
+    }
+
+    #[test]
+    fn human_report_says_clean_when_there_is_nothing_to_report() {
+        let styler = crate::style::Styler::new(false);
+        let out = scan(vec![artifact(Verdict::Clean, &[])]).to_human(&styler);
+        assert!(out.contains("scanned 1 artifact(s); clean"), "{out}");
     }
 }

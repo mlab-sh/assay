@@ -4,6 +4,9 @@
 
 <img src="./.github/banner.png">
 
+[![CI](https://github.com/Sn0wAlice/assay/actions/workflows/ci.yml/badge.svg)](https://github.com/Sn0wAlice/assay/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+
 `assay` is an offline-first, single-binary scanner for ML model artifacts
 (`safetensors`, GGUF, PyTorch pickle). It answers two questions about a model
 you just downloaded:
@@ -37,6 +40,10 @@ cargo install assay
 ```
 
 No runtime dependencies, no Python, no network access during a scan.
+
+Each tagged release also publishes prebuilt tarballs for macOS and Linux
+(x86_64 and arm64) plus a Homebrew formula, built and hashed by the release
+workflow. Grab one from the releases page if you would rather not build.
 
 ---
 
@@ -231,7 +238,10 @@ architecture.
 | `0`  | clean, nothing at or above the threshold |
 | `1`  | findings at or above `--fail-on` severity |
 | `2`  | unreadable or malformed artifact (parse failure) |
-| `>2` | internal error |
+| `3`  | internal error, or nothing scannable at the given path |
+
+Worst outcome wins: a malformed artifact anywhere in a directory scan outranks a
+high-severity finding elsewhere in it.
 
 ---
 
@@ -459,16 +469,36 @@ Worth knowing before you rely on it:
 
 ---
 
+## Development
+
+```sh
+cargo test --all            # 72 unit tests + 24 end-to-end tests
+cargo fmt --all --check     # formatting gate
+cargo clippy --all-targets -- -D warnings
+```
+
+The end-to-end tests drive the compiled binary against fixtures they build
+themselves (a forged pickle, hand-assembled safetensors and GGUF files, a
+tampered layer, a signed manifest), so the suite is hermetic: no network, no
+downloaded weights, under a second to run. CI runs all three gates on Linux and
+macOS for every push and pull request, then re-runs the pickle self-test against
+the release binary.
+
+If you touch a user-visible message, remember the README and
+[`DUMMIE.md`](./DUMMIE.md) quote real output; regenerate the examples rather
+than editing them by hand.
+
 ## Learn more
 
 - [`DUMMIE.md`](./DUMMIE.md): the complete illustrated walkthrough, with ASCII
   diagrams of every check and annotated real output.
 - [`TEST.md`](./TEST.md): download real public models and try `assay` in two
   minutes, including a harmless self-test that proves the pickle scanner fires.
+- [`CHANGELOG.md`](./CHANGELOG.md): what changed, release by release.
 
 Found a model `assay` should have flagged and did not? That is the best possible
 bug report. Open an issue with the repo id.
 
 ## License
 
-Apache-2.0.
+[Apache-2.0](./LICENSE).

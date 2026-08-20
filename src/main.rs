@@ -29,7 +29,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use cli::{Cli, ColorWhen, CommonOpts, Command};
+use cli::{Cli, ColorWhen, Command, CommonOpts};
 use compare::CompareOpts;
 use phase2::Phase2Opts;
 use progress::Progress;
@@ -51,7 +51,9 @@ fn main() -> ExitCode {
         color,
     } = cli.command
     {
-        return run_compare(subject, baseline, json, svg, mad_k, epsilon, force, fail_on, color);
+        return run_compare(
+            subject, baseline, json, svg, mad_k, epsilon, force, fail_on, color,
+        );
     }
 
     let (path, bundle, key, common) = match cli.command {

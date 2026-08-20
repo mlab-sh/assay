@@ -1,2 +1,15 @@
+# Build output
 target
+debug
+
+# Local model fixtures. Real weights are multi-gigabyte and are never committed;
+# fetch them with the commands in TEST.md.
 models
+
+# rustfmt backups
+**/*.rs.bk
+
+# Generated reports and charts from local runs
+assay-report.json
+*.svg
+selftest.pkl

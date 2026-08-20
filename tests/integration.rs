@@ -55,12 +55,7 @@ fn safetensors(header: &str, data: &[u8]) -> Vec<u8> {
 fn selftest_pickle_flags_and_fails() {
     let dir = tmpdir("pickle");
     let p = write(&dir, "selftest.pkl", &os_system_pickle());
-    let (code, out) = run(&[
-        "scan",
-        p.to_str().unwrap(),
-        "--fail-on",
-        "high",
-    ]);
+    let (code, out) = run(&["scan", p.to_str().unwrap(), "--fail-on", "high"]);
     assert_eq!(code, 1, "expected exit 1, got {code}\n{out}");
     assert!(out.contains("PICKLE_RCE_RISK"), "missing finding:\n{out}");
     assert!(out.contains("os.system"), "missing evidence:\n{out}");
@@ -103,12 +98,19 @@ fn malformed_safetensors_exits_two() {
 fn directory_scan_surfaces_safe_alternative() {
     let dir = tmpdir("repo");
     let header = r#"{"weight":{"dtype":"U8","shape":[4],"data_offsets":[0,4]}}"#;
-    write(&dir, "model.safetensors", &safetensors(header, &[1, 2, 3, 4]));
+    write(
+        &dir,
+        "model.safetensors",
+        &safetensors(header, &[1, 2, 3, 4]),
+    );
     write(&dir, "pytorch_model.bin", &os_system_pickle());
 
     let (code, out) = run(&["scan", dir.to_str().unwrap(), "--fail-on", "high"]);
     assert_eq!(code, 1, "expected exit 1\n{out}");
-    assert!(out.contains("SAFE_ALTERNATIVE_AVAILABLE"), "missing hint:\n{out}");
+    assert!(
+        out.contains("SAFE_ALTERNATIVE_AVAILABLE"),
+        "missing hint:\n{out}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -172,7 +174,10 @@ fn deep_tampered_layer_is_isolated() {
         };
         tensors.push((format!("model.layers.{i}.mlp.weight"), vals));
     }
-    let refs: Vec<(&str, Vec<f32>)> = tensors.iter().map(|(n, v)| (n.as_str(), v.clone())).collect();
+    let refs: Vec<(&str, Vec<f32>)> = tensors
+        .iter()
+        .map(|(n, v)| (n.as_str(), v.clone()))
+        .collect();
     let buf = safetensors_f32(&refs);
     let p = write(&dir, "model.safetensors", &buf);
 
@@ -204,7 +209,7 @@ fn gguf_mixed() -> Vec<u8> {
     b.extend_from_slice(&3u32.to_le_bytes()); // version
     b.extend_from_slice(&2u64.to_le_bytes()); // tensor_count
     b.extend_from_slice(&1u64.to_le_bytes()); // kv_count
-    // KV: general.architecture = "llama"
+                                              // KV: general.architecture = "llama"
     gstr(&mut b, "general.architecture");
     b.extend_from_slice(&8u32.to_le_bytes()); // STRING
     gstr(&mut b, "llama");
@@ -214,13 +219,13 @@ fn gguf_mixed() -> Vec<u8> {
     b.extend_from_slice(&32u64.to_le_bytes()); // dim
     b.extend_from_slice(&0u32.to_le_bytes()); // F32
     b.extend_from_slice(&0u64.to_le_bytes()); // offset
-    // tensor 1: blk.0.ffn_down.weight Q4_K [256] offset 128
+                                              // tensor 1: blk.0.ffn_down.weight Q4_K [256] offset 128
     gstr(&mut b, "blk.0.ffn_down.weight");
     b.extend_from_slice(&1u32.to_le_bytes());
     b.extend_from_slice(&256u64.to_le_bytes());
     b.extend_from_slice(&12u32.to_le_bytes()); // Q4_K
     b.extend_from_slice(&128u64.to_le_bytes()); // offset
-    // pad to 32-byte alignment
+                                                // pad to 32-byte alignment
     while b.len() % 32 != 0 {
         b.push(0);
     }
@@ -257,7 +262,10 @@ fn deep_gguf_defers_kquant() {
         }
     }
     assert!(saw_full && saw_deferred, "expected both qualities:\n{out}");
-    assert!(out.contains("STATS_DEFERRED_QUANTIZED"), "missing finding:\n{out}");
+    assert!(
+        out.contains("STATS_DEFERRED_QUANTIZED"),
+        "missing finding:\n{out}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -275,7 +283,10 @@ fn layered_model(n_layers: usize, scale_layer: Option<(usize, f32)>) -> Vec<u8> 
         };
         tensors.push((format!("model.layers.{i}.mlp.weight"), vals));
     }
-    let refs: Vec<(&str, Vec<f32>)> = tensors.iter().map(|(n, v)| (n.as_str(), v.clone())).collect();
+    let refs: Vec<(&str, Vec<f32>)> = tensors
+        .iter()
+        .map(|(n, v)| (n.as_str(), v.clone()))
+        .collect();
     safetensors_f32(&refs)
 }
 
@@ -286,10 +297,18 @@ fn compare_identity_is_silent() {
     let buf = layered_model(8, None);
     let a = write(&dir, "a.safetensors", &buf);
     let b = write(&dir, "b.safetensors", &buf);
-    let (code, out) = run(&["compare", a.to_str().unwrap(), b.to_str().unwrap(), "--json"]);
+    let (code, out) = run(&[
+        "compare",
+        a.to_str().unwrap(),
+        b.to_str().unwrap(),
+        "--json",
+    ]);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert!(out.contains("IDENTICAL"), "expected IDENTICAL:\n{out}");
-    assert!(!out.contains("LAYER_DRIFT_OUTLIER"), "false positive:\n{out}");
+    assert!(
+        !out.contains("LAYER_DRIFT_OUTLIER"),
+        "false positive:\n{out}"
+    );
     assert_eq!(v["summary"]["identical_fraction"], 1.0);
     assert_eq!(code, 0, "identity should be clean, got {code}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -300,7 +319,11 @@ fn compare_identity_is_silent() {
 fn compare_isolates_tampered_layer() {
     let dir = tmpdir("cmp-tamper");
     let baseline = write(&dir, "baseline.safetensors", &layered_model(8, None));
-    let subject = write(&dir, "subject.safetensors", &layered_model(8, Some((3, 4.0))));
+    let subject = write(
+        &dir,
+        "subject.safetensors",
+        &layered_model(8, Some((3, 4.0))),
+    );
     let (code, out) = run(&[
         "compare",
         subject.to_str().unwrap(),
@@ -316,9 +339,20 @@ fn compare_isolates_tampered_layer() {
             flagged.push(p["layer"].as_u64().unwrap());
         }
     }
-    assert_eq!(flagged, vec![3], "only layer 3 should be flagged, got {flagged:?}\n{out}");
-    let sev = v["layer_drift"].as_array().unwrap().iter()
-        .find(|p| p["layer"] == 3).unwrap()["anomaly"]["severity"].as_str().unwrap().to_string();
+    assert_eq!(
+        flagged,
+        vec![3],
+        "only layer 3 should be flagged, got {flagged:?}\n{out}"
+    );
+    let sev = v["layer_drift"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["layer"] == 3)
+        .unwrap()["anomaly"]["severity"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_eq!(sev, "high", "tamper should be high severity\n{out}");
     assert_eq!(code, 1, "tamper should fail --fail-on high");
     let _ = std::fs::remove_dir_all(&dir);
@@ -332,16 +366,31 @@ fn compare_arch_mismatch_refuses() {
     let big = write(&dir, "big.safetensors", &layered_model(8, None));
     let small = write(&dir, "small.safetensors", &layered_model(4, None));
 
-    let (_c, out) = run(&["compare", big.to_str().unwrap(), small.to_str().unwrap(), "--json"]);
+    let (_c, out) = run(&[
+        "compare",
+        big.to_str().unwrap(),
+        small.to_str().unwrap(),
+        "--json",
+    ]);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert!(out.contains("ARCH_MISMATCH"), "expected refusal:\n{out}");
     assert_eq!(v["arch"]["match"], false);
-    assert!(v["tensor_drift"].as_array().unwrap().is_empty(), "should not emit drift:\n{out}");
+    assert!(
+        v["tensor_drift"].as_array().unwrap().is_empty(),
+        "should not emit drift:\n{out}"
+    );
 
     let (_c2, out2) = run(&[
-        "compare", big.to_str().unwrap(), small.to_str().unwrap(), "--force", "--json",
+        "compare",
+        big.to_str().unwrap(),
+        small.to_str().unwrap(),
+        "--force",
+        "--json",
     ]);
-    assert!(out2.contains("STRUCTURAL_DIVERGENCE"), "force should surface structural:\n{out2}");
+    assert!(
+        out2.contains("STRUCTURAL_DIVERGENCE"),
+        "force should surface structural:\n{out2}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -351,8 +400,18 @@ fn compare_is_deterministic() {
     let dir = tmpdir("cmp-det");
     let a = write(&dir, "a.safetensors", &layered_model(8, Some((2, 3.0))));
     let b = write(&dir, "b.safetensors", &layered_model(8, None));
-    let (_c1, o1) = run(&["compare", a.to_str().unwrap(), b.to_str().unwrap(), "--json"]);
-    let (_c2, o2) = run(&["compare", a.to_str().unwrap(), b.to_str().unwrap(), "--json"]);
+    let (_c1, o1) = run(&[
+        "compare",
+        a.to_str().unwrap(),
+        b.to_str().unwrap(),
+        "--json",
+    ]);
+    let (_c2, o2) = run(&[
+        "compare",
+        a.to_str().unwrap(),
+        b.to_str().unwrap(),
+        "--json",
+    ]);
     assert_eq!(o1, o2, "compare output not deterministic");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -394,13 +453,32 @@ fn compare_canonicalizes_wrapper_prefix() {
     let dir = tmpdir("cmp-canon");
     let bare = write(&dir, "gpt2.safetensors", &gpt2like(false, 1.0));
     let wrapped = write(&dir, "dialogpt.safetensors", &gpt2like(true, 1.05));
-    let (_c, out) = run(&["compare", bare.to_str().unwrap(), wrapped.to_str().unwrap(), "--json"]);
+    let (_c, out) = run(&[
+        "compare",
+        bare.to_str().unwrap(),
+        wrapped.to_str().unwrap(),
+        "--json",
+    ]);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(v["summary"]["matched"], 14, "should match wte+12 layers+ln_f:\n{out}");
-    assert_eq!(v["summary"]["structural"], 0, "no structural divergence expected:\n{out}");
-    assert_eq!(count_finding(&v, "TIED_WEIGHT"), 1, "exactly one tied weight:\n{out}");
+    assert_eq!(
+        v["summary"]["matched"], 14,
+        "should match wte+12 layers+ln_f:\n{out}"
+    );
+    assert_eq!(
+        v["summary"]["structural"], 0,
+        "no structural divergence expected:\n{out}"
+    );
+    assert_eq!(
+        count_finding(&v, "TIED_WEIGHT"),
+        1,
+        "exactly one tied weight:\n{out}"
+    );
     assert_eq!(count_finding(&v, "STRUCTURAL_DIVERGENCE"), 0);
-    assert_eq!(count_finding(&v, "LAYER_DRIFT_OUTLIER"), 0, "broad uniform drift must not flag:\n{out}");
+    assert_eq!(
+        count_finding(&v, "LAYER_DRIFT_OUTLIER"),
+        0,
+        "broad uniform drift must not flag:\n{out}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -412,11 +490,24 @@ fn compare_canonicalization_is_symmetric() {
     let bare = write(&dir, "gpt2.safetensors", &gpt2like(false, 1.0));
     let wrapped = write(&dir, "dialogpt.safetensors", &gpt2like(true, 1.05));
 
-    let (_a, o1) = run(&["compare", bare.to_str().unwrap(), wrapped.to_str().unwrap(), "--json"]);
-    let (_b, o2) = run(&["compare", wrapped.to_str().unwrap(), bare.to_str().unwrap(), "--json"]);
+    let (_a, o1) = run(&[
+        "compare",
+        bare.to_str().unwrap(),
+        wrapped.to_str().unwrap(),
+        "--json",
+    ]);
+    let (_b, o2) = run(&[
+        "compare",
+        wrapped.to_str().unwrap(),
+        bare.to_str().unwrap(),
+        "--json",
+    ]);
     let v1: serde_json::Value = serde_json::from_str(&o1).unwrap();
     let v2: serde_json::Value = serde_json::from_str(&o2).unwrap();
-    assert_eq!(v1["summary"]["matched"], v2["summary"]["matched"], "asymmetric matched count");
+    assert_eq!(
+        v1["summary"]["matched"], v2["summary"]["matched"],
+        "asymmetric matched count"
+    );
     assert_eq!(count_finding(&v1, "TIED_WEIGHT"), 1);
     assert_eq!(count_finding(&v2, "TIED_WEIGHT"), 1);
     assert_eq!(v1["summary"]["structural"], 0);
@@ -433,8 +524,14 @@ fn phase1_unchanged_and_deterministic() {
     let p = write(&dir, "model.safetensors", &buf);
 
     let (_c, plain) = run(&["scan", p.to_str().unwrap(), "--json"]);
-    assert!(!plain.contains("\"stats\""), "phase1 leaked stats:\n{plain}");
-    assert!(!plain.contains("layer_profile"), "phase1 leaked profile:\n{plain}");
+    assert!(
+        !plain.contains("\"stats\""),
+        "phase1 leaked stats:\n{plain}"
+    );
+    assert!(
+        !plain.contains("layer_profile"),
+        "phase1 leaked profile:\n{plain}"
+    );
 
     let (_c1, deep1) = run(&["scan", p.to_str().unwrap(), "--deep", "--json"]);
     let (_c2, deep2) = run(&["scan", p.to_str().unwrap(), "--deep", "--json"]);
@@ -446,5 +543,253 @@ fn phase1_unchanged_and_deterministic() {
     let v_deep: serde_json::Value = serde_json::from_str(&deep1).unwrap();
     assert_eq!(v_plain["verdict"], v_deep["verdict"]);
     assert_eq!(v_plain["hashes"], v_deep["hashes"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ===========================================================================
+// `verify`: signature and provenance, end to end
+// ===========================================================================
+
+/// A fixed key, so the whole suite stays deterministic and offline.
+fn signing_key() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+}
+
+/// Write a one-tensor model and return (path, its computed manifest hash).
+fn signed_fixture(tag: &str) -> (PathBuf, PathBuf, String) {
+    let dir = tmpdir(tag);
+    let buf = safetensors_f32(&[("model.layers.0.w", vec![1.0, 2.0, 3.0, 4.0])]);
+    let p = write(&dir, "model.safetensors", &buf);
+    let (_c, json) = run(&["scan", p.to_str().unwrap(), "--json"]);
+    let manifest = extract_manifest(&json).expect("manifest hash");
+    (dir, p, manifest)
+}
+
+fn signature_status(json: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(json).expect("json report");
+    v["signature"].as_str().unwrap_or_default().to_string()
+}
+
+#[test]
+fn verify_accepts_a_valid_detached_signature() {
+    use ed25519_dalek::Signer;
+    let (dir, p, manifest) = signed_fixture("verify-ok");
+    let sk = signing_key();
+
+    // The signature is over the manifest hash string, hex-encoded on disk.
+    let sig = sk.sign(manifest.as_bytes());
+    write(
+        &dir,
+        "model.safetensors.sig",
+        hex::encode(sig.to_bytes()).as_bytes(),
+    );
+    let key = write(
+        &dir,
+        "signer.pub",
+        hex::encode(sk.verifying_key().to_bytes()).as_bytes(),
+    );
+
+    let (code, out) = run(&[
+        "verify",
+        p.to_str().unwrap(),
+        "--key",
+        key.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 0, "a valid signature must not fail the gate\n{out}");
+    assert_eq!(signature_status(&out), "signed");
+    assert!(out.contains("SIG_VERIFIED"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn verify_accepts_a_raw_64_byte_signature_too() {
+    use ed25519_dalek::Signer;
+    let (dir, p, manifest) = signed_fixture("verify-raw");
+    let sk = signing_key();
+
+    let sig = sk.sign(manifest.as_bytes());
+    write(&dir, "model.safetensors.sig", &sig.to_bytes());
+    let key = write(&dir, "signer.pub", &sk.verifying_key().to_bytes());
+
+    let (code, out) = run(&[
+        "verify",
+        p.to_str().unwrap(),
+        "--key",
+        key.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(signature_status(&out), "signed");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn verify_rejects_a_signature_over_different_content() {
+    use ed25519_dalek::Signer;
+    let (dir, p, _manifest) = signed_fixture("verify-bad");
+    let sk = signing_key();
+
+    // Signed something else: exactly what a swapped-weights attack looks like.
+    let sig = sk.sign(b"blake3:not-this-model");
+    write(
+        &dir,
+        "model.safetensors.sig",
+        hex::encode(sig.to_bytes()).as_bytes(),
+    );
+    let key = write(
+        &dir,
+        "signer.pub",
+        hex::encode(sk.verifying_key().to_bytes()).as_bytes(),
+    );
+
+    let (code, out) = run(&[
+        "verify",
+        p.to_str().unwrap(),
+        "--key",
+        key.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 1, "a mismatch must fail the gate\n{out}");
+    assert_eq!(signature_status(&out), "signature-mismatch");
+    assert!(out.contains("SIG_MISMATCH"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn verify_without_a_key_says_unverified_rather_than_signed() {
+    use ed25519_dalek::Signer;
+    let (dir, p, manifest) = signed_fixture("verify-nokey");
+    let sig = signing_key().sign(manifest.as_bytes());
+    write(
+        &dir,
+        "model.safetensors.sig",
+        hex::encode(sig.to_bytes()).as_bytes(),
+    );
+
+    let (code, out) = run(&["verify", p.to_str().unwrap(), "--json"]);
+    assert_eq!(code, 0, "an unverifiable signature is not a failure\n{out}");
+    assert_eq!(signature_status(&out), "unverified");
+    assert!(out.contains("SIG_NO_KEY"), "{out}");
+    assert!(
+        !out.contains("SIG_VERIFIED"),
+        "must not claim a pass:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn verify_matches_a_transparency_manifest() {
+    let (dir, p, manifest) = signed_fixture("verify-tm");
+    let bundle = write(
+        &dir,
+        "model.manifest.json",
+        format!("{{\"manifest\":\"{manifest}\"}}").as_bytes(),
+    );
+
+    let (code, out) = run(&[
+        "verify",
+        p.to_str().unwrap(),
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(signature_status(&out), "signed");
+    assert!(out.contains("SIG_MANIFEST_MATCH"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn verify_flags_a_transparency_manifest_that_records_other_weights() {
+    let (dir, p, _manifest) = signed_fixture("verify-tm-bad");
+    let bundle = write(
+        &dir,
+        "model.manifest.json",
+        b"{\"manifest\":\"blake3:0000000000000000000000000000000000000000000000000000000000000000\"}",
+    );
+
+    let (code, out) = run(&[
+        "verify",
+        p.to_str().unwrap(),
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(
+        code, 1,
+        "a recorded-hash mismatch must fail the gate\n{out}"
+    );
+    assert_eq!(signature_status(&out), "signature-mismatch");
+    assert!(out.contains("SIG_MISMATCH"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The honesty contract: a Sigstore bundle is present but its chain is not
+/// verified, so it must never be reported as `signed`.
+#[test]
+fn verify_never_claims_sigstore_bundles_are_trusted() {
+    let (dir, p, _manifest) = signed_fixture("verify-sigstore");
+    write(
+        &dir,
+        "model.safetensors.sigstore",
+        b"{\"mediaType\":\"application/vnd.dev.sigstore.bundle+json;version=0.3\",\
+          \"verificationMaterial\":{},\"messageSignature\":{}}",
+    );
+
+    let (code, out) = run(&["verify", p.to_str().unwrap(), "--json"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(signature_status(&out), "unverified (sigstore)");
+    assert!(out.contains("SIG_SIGSTORE_UNVERIFIED"), "{out}");
+    assert!(!out.contains("SIG_VERIFIED"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn verify_reports_an_unrecognized_bundle_instead_of_ignoring_it() {
+    let (dir, p, _manifest) = signed_fixture("verify-weird");
+    let bundle = write(&dir, "weird.json", b"{\"something\":\"else\"}");
+
+    let (code, out) = run(&[
+        "verify",
+        p.to_str().unwrap(),
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(signature_status(&out), "unverified");
+    assert!(out.contains("SIG_UNRECOGNIZED"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A sidecar next to the weights is honored by a plain `scan`, not just by
+/// `verify`: provenance is never opt-in.
+#[test]
+fn scan_autodetects_a_model_sig_sidecar() {
+    let (dir, p, manifest) = signed_fixture("verify-autodetect");
+    write(
+        &dir,
+        "model.sig",
+        format!("{{\"manifest\":\"{manifest}\"}}").as_bytes(),
+    );
+
+    let (code, out) = run(&["scan", p.to_str().unwrap(), "--json"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(signature_status(&out), "signed");
+    assert!(out.contains("SIG_MANIFEST_MATCH"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn verify_on_an_unsigned_model_is_quiet_and_passes() {
+    let (dir, p, _manifest) = signed_fixture("verify-unsigned");
+    let (code, out) = run(&["verify", p.to_str().unwrap(), "--json"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(signature_status(&out), "unsigned");
+    assert!(
+        !out.contains("SIG_"),
+        "no signature findings expected:\n{out}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

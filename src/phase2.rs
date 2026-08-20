@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use crate::dequant::{self, GgmlClass};
-use crate::fingerprint::{self, FpInput, Fingerprint};
+use crate::fingerprint::{self, Fingerprint, FpInput};
 use crate::formats::{gguf, safetensors};
 use crate::numeric::{self, DType};
 use crate::profile::{self, ProfilePoint};
@@ -117,7 +117,11 @@ fn run_safetensors(data: &[u8], artifact_path: &Path, opts: &Phase2Opts) -> Phas
 
     // Fingerprint (declared identity + dims from sibling config.json if present).
     let cfg = artifact_path.parent().and_then(read_hf_config);
-    let layer_count = names.iter().filter_map(|n| profile::layer_index(n)).max().map(|m| m + 1);
+    let layer_count = names
+        .iter()
+        .filter_map(|n| profile::layer_index(n))
+        .max()
+        .map(|m| m + 1);
     let (fp, fp_findings) = fingerprint::analyze(&FpInput {
         tensor_names: names,
         declared_arch: cfg.as_ref().and_then(|c| c.model_type.clone()),
@@ -228,7 +232,11 @@ fn run_gguf(data: &[u8], artifact_path: &Path, opts: &Phase2Opts) -> Phase2Resul
             .map(|(_, v)| *v)
     };
     let layer_count = kv(".block_count").or_else(|| {
-        names.iter().filter_map(|n| profile::layer_index(n)).max().map(|m| m + 1)
+        names
+            .iter()
+            .filter_map(|n| profile::layer_index(n))
+            .max()
+            .map(|m| m + 1)
     });
     let (fp, fp_findings) = fingerprint::analyze(&FpInput {
         tensor_names: names,
@@ -289,7 +297,10 @@ fn read_hf_config(dir: &Path) -> Option<HfConfig> {
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
     let u = |k: &str| v.get(k).and_then(|x| x.as_u64());
     Some(HfConfig {
-        model_type: v.get("model_type").and_then(|x| x.as_str()).map(String::from),
+        model_type: v
+            .get("model_type")
+            .and_then(|x| x.as_str())
+            .map(String::from),
         layers: u("num_hidden_layers").or_else(|| u("n_layer")),
         hidden: u("hidden_size").or_else(|| u("n_embd")),
         heads: u("num_attention_heads").or_else(|| u("n_head")),

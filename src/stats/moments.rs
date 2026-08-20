@@ -28,8 +28,7 @@ impl Moments {
         let delta_n2 = delta_n * delta_n;
         let term1 = delta * delta_n * n1;
         self.mean += delta_n;
-        self.m4 += term1 * delta_n2 * (n * n - 3.0 * n + 3.0)
-            + 6.0 * delta_n2 * self.m2
+        self.m4 += term1 * delta_n2 * (n * n - 3.0 * n + 3.0) + 6.0 * delta_n2 * self.m2
             - 4.0 * delta_n * self.m3;
         self.m3 += term1 * delta_n * (n - 2.0) - 3.0 * delta_n * self.m2;
         self.m2 += term1;

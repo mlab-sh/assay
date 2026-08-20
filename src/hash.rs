@@ -48,3 +48,84 @@ fn update_field(h: &mut Hasher, field: &[u8]) {
     h.update(&(field.len() as u64).to_le_bytes());
     h.update(field);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str, dtype: &str, shape: &[u64], digest: &str) -> TensorEntry {
+        TensorEntry {
+            name: name.to_string(),
+            dtype: dtype.to_string(),
+            shape: shape.to_vec(),
+            digest: digest.to_string(),
+        }
+    }
+
+    fn sample() -> Vec<TensorEntry> {
+        vec![
+            entry("a.weight", "F32", &[2, 3], "aa"),
+            entry("b.weight", "F32", &[4], "bb"),
+        ]
+    }
+
+    #[test]
+    fn manifest_is_tagged_and_stable() {
+        let mut e = sample();
+        let h1 = manifest_hash(&mut e);
+        assert!(h1.starts_with("blake3:"));
+        let mut again = sample();
+        assert_eq!(h1, manifest_hash(&mut again));
+    }
+
+    #[test]
+    fn manifest_is_independent_of_input_order() {
+        let mut a = sample();
+        let mut b: Vec<TensorEntry> = sample().into_iter().rev().collect();
+        assert_eq!(manifest_hash(&mut a), manifest_hash(&mut b));
+    }
+
+    #[test]
+    fn manifest_changes_with_any_tensor_field() {
+        let base = manifest_hash(&mut sample());
+
+        let mut renamed = sample();
+        renamed[0].name = "z.weight".into();
+        assert_ne!(base, manifest_hash(&mut renamed), "tensor name must matter");
+
+        let mut retyped = sample();
+        retyped[0].dtype = "BF16".into();
+        assert_ne!(base, manifest_hash(&mut retyped), "dtype must matter");
+
+        let mut reshaped = sample();
+        reshaped[0].shape = vec![3, 2];
+        assert_ne!(base, manifest_hash(&mut reshaped), "shape must matter");
+
+        let mut recontent = sample();
+        recontent[0].digest = "ab".into();
+        assert_ne!(base, manifest_hash(&mut recontent), "content must matter");
+    }
+
+    #[test]
+    fn length_prefixing_makes_the_encoding_unambiguous() {
+        // Without length prefixes, ("ab","c") and ("a","bc") would collide.
+        let mut x = vec![entry("ab", "c", &[], "")];
+        let mut y = vec![entry("a", "bc", &[], "")];
+        assert_ne!(manifest_hash(&mut x), manifest_hash(&mut y));
+    }
+
+    #[test]
+    fn adding_a_tensor_changes_the_manifest() {
+        let base = manifest_hash(&mut sample());
+        let mut more = sample();
+        more.push(entry("c.weight", "F32", &[1], "cc"));
+        assert_ne!(base, manifest_hash(&mut more));
+    }
+
+    #[test]
+    fn tagged_and_blake3_hex_agree() {
+        let hex = blake3_hex(b"payload");
+        assert_eq!(tagged(&hex), format!("blake3:{hex}"));
+        assert_eq!(hex.len(), 64);
+    }
+}

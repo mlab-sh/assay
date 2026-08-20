@@ -50,7 +50,6 @@ impl DType {
             _ => return None,
         })
     }
-
 }
 
 /// IEEE-754 half-precision → f32.
@@ -99,7 +98,9 @@ pub fn decode_index(raw: &[u8], dtype: DType, i: usize) -> f64 {
         DType::F64 => f64::from_le_bytes(raw[off..off + 8].try_into().unwrap()),
         DType::F32 => f32::from_le_bytes(raw[off..off + 4].try_into().unwrap()) as f64,
         DType::F16 => f16_to_f32(u16::from_le_bytes(raw[off..off + 2].try_into().unwrap())) as f64,
-        DType::BF16 => bf16_to_f32(u16::from_le_bytes(raw[off..off + 2].try_into().unwrap())) as f64,
+        DType::BF16 => {
+            bf16_to_f32(u16::from_le_bytes(raw[off..off + 2].try_into().unwrap())) as f64
+        }
         DType::I64 => i64::from_le_bytes(raw[off..off + 8].try_into().unwrap()) as f64,
         DType::I32 => i32::from_le_bytes(raw[off..off + 4].try_into().unwrap()) as f64,
         DType::I16 => i16::from_le_bytes(raw[off..off + 2].try_into().unwrap()) as f64,

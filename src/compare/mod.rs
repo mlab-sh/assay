@@ -185,7 +185,10 @@ fn product(dims: &[u64]) -> u64 {
 /// Build a canonical-name→tensor map for a model, slicing exact tensor byte
 /// ranges. Keys are canonicalized; each `T` retains its original name.
 /// Returns the map plus the number of keys whose name was normalized.
-fn build_tensors<'a>(fmt: Format, data: &'a [u8]) -> Result<(BTreeMap<String, T<'a>>, usize), String> {
+fn build_tensors<'a>(
+    fmt: Format,
+    data: &'a [u8],
+) -> Result<(BTreeMap<String, T<'a>>, usize), String> {
     let mut map = BTreeMap::new();
     let mut stripped = 0usize;
     let mut insert = |name: String, shape, raw, dec, map: &mut BTreeMap<String, T<'a>>| {
@@ -193,7 +196,15 @@ fn build_tensors<'a>(fmt: Format, data: &'a [u8]) -> Result<(BTreeMap<String, T<
         if canon != name {
             stripped += 1;
         }
-        map.insert(canon, T { name, shape, raw, dec });
+        map.insert(
+            canon,
+            T {
+                name,
+                shape,
+                raw,
+                dec,
+            },
+        );
     };
     match fmt {
         Format::Safetensors => {
@@ -214,7 +225,16 @@ fn build_tensors<'a>(fmt: Format, data: &'a [u8]) -> Result<(BTreeMap<String, T<
                 };
                 let end = (t.offset + exact).min(data.len());
                 let raw = &data[t.offset.min(data.len())..end];
-                insert(t.name, t.dims, raw, Decoder::Gg { type_id: t.type_id, n }, &mut map);
+                insert(
+                    t.name,
+                    t.dims,
+                    raw,
+                    Decoder::Gg {
+                        type_id: t.type_id,
+                        n,
+                    },
+                    &mut map,
+                );
             }
         }
         _ => return Err("compare supports safetensors and GGUF only".into()),
@@ -274,7 +294,10 @@ fn resolve_model(p: &Path) -> Result<PathBuf, String> {
     match (st.len(), gg.len()) {
         (1, _) => Ok(st[0].clone()),
         (0, 1) => Ok(gg[0].clone()),
-        (0, 0) => Err(format!("no safetensors or GGUF artifact in {}", p.display())),
+        (0, 0) => Err(format!(
+            "no safetensors or GGUF artifact in {}",
+            p.display()
+        )),
         _ => Err(format!(
             "{} contains multiple weight files (e.g. sharded); point compare at a single file",
             p.display()
@@ -325,10 +348,14 @@ pub fn run(subject: &Path, baseline: &Path, opts: &CompareOpts) -> CompareReport
     // Audit trail: what canonicalization normalized away.
     let mut normalization = Vec::new();
     if s_stripped > 0 {
-        normalization.push(format!("stripped wrapper prefix from {s_stripped} subject tensor name(s)"));
+        normalization.push(format!(
+            "stripped wrapper prefix from {s_stripped} subject tensor name(s)"
+        ));
     }
     if b_stripped > 0 {
-        normalization.push(format!("stripped wrapper prefix from {b_stripped} baseline tensor name(s)"));
+        normalization.push(format!(
+            "stripped wrapper prefix from {b_stripped} baseline tensor name(s)"
+        ));
     }
 
     // Fingerprint on canonical names so naming convention doesn't skew arch.
@@ -337,7 +364,9 @@ pub fn run(subject: &Path, baseline: &Path, opts: &CompareOpts) -> CompareReport
     let fp_s = fingerprint_of(s_fmt, s_data, &s_names);
     let fp_b = fingerprint_of(b_fmt, b_data, &b_names);
     let arch_label = |f: &fingerprint::Fingerprint| {
-        f.detected_family.clone().unwrap_or_else(|| f.scheme.clone())
+        f.detected_family
+            .clone()
+            .unwrap_or_else(|| f.scheme.clone())
     };
     let arch_match = fp_s.scheme == fp_b.scheme && fp_s.layer_count == fp_b.layer_count;
     let arch = ArchInfo {
@@ -394,8 +423,7 @@ pub fn run(subject: &Path, baseline: &Path, opts: &CompareOpts) -> CompareReport
     let mut tensor_drift: Vec<TensorDrift> = Vec::new();
     let mut deferred_pairs = 0u64;
 
-    let all_keys: std::collections::BTreeSet<&String> =
-        s_map.keys().chain(b_map.keys()).collect();
+    let all_keys: std::collections::BTreeSet<&String> = s_map.keys().chain(b_map.keys()).collect();
 
     for key in all_keys {
         match (s_map.get(key), b_map.get(key)) {
@@ -456,10 +484,7 @@ pub fn run(subject: &Path, baseline: &Path, opts: &CompareOpts) -> CompareReport
     } else {
         0.0
     };
-    let worst_drift = tensor_drift
-        .iter()
-        .map(|t| t.rel_l2)
-        .fold(0.0f64, f64::max);
+    let worst_drift = tensor_drift.iter().map(|t| t.rel_l2).fold(0.0f64, f64::max);
 
     if structural.is_empty() && matched > 0 && worst_drift < 1e-6 {
         findings.push(Finding::new(
@@ -577,10 +602,7 @@ fn median(v: &[f64]) -> f64 {
 
 /// Bucket tensor drift into layers and flag CONCENTRATED outliers (a localized
 /// spike above the surrounding drift level), not total drift.
-fn build_layer_drift(
-    tensor_drift: &[TensorDrift],
-    mad_k: f64,
-) -> (Vec<LayerDrift>, Vec<Finding>) {
+fn build_layer_drift(tensor_drift: &[TensorDrift], mad_k: f64) -> (Vec<LayerDrift>, Vec<Finding>) {
     use std::collections::BTreeMap;
     // layer -> (sum diff2, sum bb, dominating tensor by diff2)
     let mut agg: BTreeMap<u64, (f64, f64, (f64, String))> = BTreeMap::new();
@@ -678,7 +700,12 @@ fn detect(path: &Path, data: &[u8]) -> Format {
 
 /// Decide whether a one-sided tensor is explained by weight tying (info) rather
 /// than a genuine structural divergence (high).
-fn tie_finding(missing_key: &str, side_map: &BTreeMap<String, T>, missing_t: &T, eps: f64) -> Option<Finding> {
+fn tie_finding(
+    missing_key: &str,
+    side_map: &BTreeMap<String, T>,
+    missing_t: &T,
+    eps: f64,
+) -> Option<Finding> {
     let cands = tied_counterparts(missing_key)?;
     for c in cands {
         let Some(ct) = side_map.get(*c) else {
@@ -725,7 +752,11 @@ fn error_report(subject: &Path, baseline: &Path, msg: &str) -> CompareReport {
         structural_divergences: Vec::new(),
         tensor_drift: Vec::new(),
         layer_drift: Vec::new(),
-        findings: vec![Finding::new("COMPARE_ERROR", Severity::High, msg.to_string())],
+        findings: vec![Finding::new(
+            "COMPARE_ERROR",
+            Severity::High,
+            msg.to_string(),
+        )],
         summary: Summary {
             matched: 0,
             identical_fraction: 0.0,
@@ -756,7 +787,11 @@ pub fn render_human(r: &CompareReport, styler: &crate::style::Styler) -> String 
         }
     ));
     for note in &r.normalization {
-        out.push_str(&format!("  {} {}\n", styler.dim("normalized:"), styler.dim(note)));
+        out.push_str(&format!(
+            "  {} {}\n",
+            styler.dim("normalized:"),
+            styler.dim(note)
+        ));
     }
     out.push_str(&format!(
         "  {} matched, {} structural divergence(s), worst rel_l2: {:.4}\n",
@@ -765,7 +800,11 @@ pub fn render_human(r: &CompareReport, styler: &crate::style::Styler) -> String 
 
     // Drift sparkline.
     if !r.layer_drift.is_empty() {
-        let values: Vec<f64> = r.layer_drift.iter().map(|p| p.rel_l2.min(f64::MAX)).collect();
+        let values: Vec<f64> = r
+            .layer_drift
+            .iter()
+            .map(|p| p.rel_l2.min(f64::MAX))
+            .collect();
         let anomalous: Vec<bool> = r.layer_drift.iter().map(|p| p.anomaly.is_some()).collect();
         let labels: Vec<String> = r
             .layer_drift
@@ -812,7 +851,10 @@ pub fn render_svg(r: &CompareReport) -> String {
         .filter_map(|(i, p)| p.anomaly.as_ref().map(|a| (i, a.mads)))
         .collect();
     crate::profile::render::svg_values(
-        &format!("assay drift profile: rel_l2 ({} layers)", r.layer_drift.len()),
+        &format!(
+            "assay drift profile: rel_l2 ({} layers)",
+            r.layer_drift.len()
+        ),
         &values,
         &anomalous,
     )

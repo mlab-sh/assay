@@ -1,0 +1,101 @@
+# Changelog
+
+All notable changes to `assay` are documented here.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+Nothing yet.
+
+## [0.1.0] - 2026-08-20
+
+First release. `assay` reads a model artifact and answers two questions without
+ever loading, importing, or executing it: is this file what it claims to be, and
+does loading it put the machine at risk.
+
+### Added: commands
+
+| Command | What it does |
+|---|---|
+| `scan PATH` | Identify every artifact under a path, validate its container, hash it, check its signature, and report a verdict per artifact. |
+| `verify PATH` | The same checks, aimed at the provenance answer, with `--bundle` and `--key` for explicit signature material. |
+| `compare SUBJECT BASELINE` | Differential weight analysis against a known-good reference of the same architecture. |
+
+### Added: container and provenance checks
+
+- **Format detection** from magic bytes, with the extension as a hint only. A
+  GGUF file named `.bin` is GGUF; `assay` refuses to guess when the bytes and
+  the name disagree.
+- **Pickle code-execution scanning**: every pickle artifact is untrusted by
+  default, with an opcode-level scan for `GLOBAL`, `STACK_GLOBAL`, `REDUCE`, and
+  imports of `os`, `subprocess`, `builtins` and friends. Torch zip containers
+  are opened and scanned inside. When a clean `safetensors` file sits in the
+  same repo, the report says so.
+- **safetensors structural validation**: `u64` length prefix and JSON header,
+  every `data_offsets` range checked for bounds, ordering, and overlap, and
+  dtype and shape declarations checked against the byte ranges they claim.
+- **GGUF sanity**: magic, version, tensor count, KV metadata block, and every
+  tensor offset. Embedded Jinja2 chat templates are surfaced for human review
+  instead of being trusted silently.
+- **Deterministic hashing**: per-tensor digests plus a manifest hash that
+  survives renaming and repacking, because it depends only on tensor identity
+  and content. Length-prefixed canonical encoding, so no field boundary is
+  ambiguous.
+- **Signature verification**: detached ed25519 signatures over the manifest
+  hash, and OpenSSF model-transparency manifests. Sidecars next to the artifact
+  are auto-detected. A Sigstore or cosign bundle is reported as present but
+  unverified, never as trusted; `signed` is only ever printed on a real
+  cryptographic pass.
+
+### Added: weight inspection (`--deep`)
+
+Signals with a severity, never verdicts. Tensors are read cold and streamed, so
+peak RAM stays well under model size.
+
+- Per-tensor statistics in one streaming pass: NaN and Inf integrity, mean, std,
+  L2 and RMS, excess kurtosis, sparsity, and 6 sigma outlier mass.
+- Per-layer profile with robust median and MAD anomaly detection, a terminal
+  sparkline (`--profile`), and a faithful 1D SVG chart (`--svg`).
+- Secret and string scanning over metadata, GGUF KV blocks, and sibling config
+  and tokenizer files: API keys, PEM private key blocks, suspicious URLs.
+  High-entropy tensor-region scanning is available behind
+  `--scan-tensor-entropy` and clearly labeled experimental.
+- Architectural fingerprint from naming scheme, layer count, hidden dimension,
+  head count, and vocabulary size, which catches a model that claims to be one
+  architecture but is structurally another.
+
+### Added: differential analysis (`compare`)
+
+- Matched tensor pairs streamed in lockstep, with both files mapped and neither
+  held fully in RAM.
+- Name canonicalization across serialization conventions (a `transformer.`
+  wrapper prefix is normalized away), and weight tying recognized as a
+  convention rather than reported as a divergence.
+- Cross-architecture comparison refused by default (`ARCH_MISMATCH`, override
+  with `--force`), because drift between different architectures means nothing.
+- `STRUCTURAL_DIVERGENCE` for added, removed, or reshaped tensors;
+  `LAYER_DRIFT_OUTLIER` and `TENSOR_DRIFT` for concentrated drift, scored by
+  magnitude; `IDENTICAL` when drift is zero everywhere.
+
+### Added: output and CI
+
+- Human-readable and JSON reports, with the JSON field names treated as a
+  documented contract.
+- Real-time progress on stderr, auto-disabled off a TTY or with `--no-progress`.
+- `--color auto|always|never`.
+- Exit codes: `0` clean, `1` findings at or above `--fail-on`, `2` malformed
+  artifact, `3` internal error. Worst outcome wins.
+
+### Known limits
+
+- K-quant and IQ GGUF tensors are reported as `STATS_DEFERRED_QUANTIZED`
+  (structural information only) rather than decoded. Legacy quants and the float
+  types are dequantized for real statistics.
+- Payloads that only activate after quantization are not detected. The
+  dequantization, streaming, and lockstep drift machinery is in place; the check
+  is not.
+- Sigstore and cosign chains are not verified, only reported.
+- Behavioral or gradient-based fingerprinting is permanently out of scope: it
+  would require executing the model.

@@ -45,7 +45,10 @@ pub fn evaluate(
     bundle: Option<&Path>,
     key: Option<&Path>,
 ) -> SignatureOutcome {
-    let bundle_path = match bundle.map(PathBuf::from).or_else(|| autodetect(artifact_path)) {
+    let bundle_path = match bundle
+        .map(PathBuf::from)
+        .or_else(|| autodetect(artifact_path))
+    {
         Some(p) => p,
         None => return SignatureOutcome::unsigned(),
     };
@@ -135,17 +138,13 @@ fn sigstore_unverified(display: &str) -> SignatureOutcome {
             "SIG_SIGSTORE_UNVERIFIED",
             Severity::Info,
             "a Sigstore/cosign bundle is present, but full chain verification \
-             (Fulcio cert + Rekor log) is not implemented in Phase 1; treat as unverified",
+             (Fulcio cert + Rekor log) is not implemented; treat as unverified",
         )
         .with_evidence(vec![display.to_string()])],
     }
 }
 
-fn verify_transparency(
-    expected: &str,
-    computed: Option<&str>,
-    display: &str,
-) -> SignatureOutcome {
+fn verify_transparency(expected: &str, computed: Option<&str>, display: &str) -> SignatureOutcome {
     match computed {
         Some(c) if c == expected => SignatureOutcome {
             status: "signed".into(),

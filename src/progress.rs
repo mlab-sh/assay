@@ -53,7 +53,15 @@ impl Progress {
     }
 
     /// Close out the current artifact's line with its verdict and timing.
-    pub fn file_finished(&mut self, idx: usize, total: usize, name: &str, size: u64, verdict: Verdict, n_findings: usize) {
+    pub fn file_finished(
+        &mut self,
+        idx: usize,
+        total: usize,
+        name: &str,
+        size: u64,
+        verdict: Verdict,
+        n_findings: usize,
+    ) {
         self.bytes_total += size;
         match verdict {
             Verdict::Clean => self.clean += 1,

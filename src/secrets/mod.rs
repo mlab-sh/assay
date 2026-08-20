@@ -41,7 +41,8 @@ pub fn scan(strings: &[(String, String)], artifact_dir: Option<&Path>) -> Vec<Fi
         }
     }
 
-    findings.sort_by(|a, b| (a.id.clone(), a.detail.clone()).cmp(&(b.id.clone(), b.detail.clone())));
+    findings
+        .sort_by(|a, b| (a.id.clone(), a.detail.clone()).cmp(&(b.id.clone(), b.detail.clone())));
     findings.dedup_by(|a, b| a.id == b.id && a.detail == b.detail);
     findings
 }
@@ -95,7 +96,12 @@ enum Confidence {
 
 fn classify_secret(tok: &str) -> Option<(&'static str, Confidence)> {
     let len = tok.len();
-    if tok.starts_with("AKIA") && len == 20 && tok[4..].bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
+    if tok.starts_with("AKIA")
+        && len == 20
+        && tok[4..]
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    {
         return Some(("AWS access key id", Confidence::High));
     }
     if (tok.starts_with("ghp_") || tok.starts_with("github_pat_")) && len >= 36 {
@@ -118,8 +124,9 @@ fn classify_secret(tok: &str) -> Option<(&'static str, Confidence)> {
 }
 
 fn looks_tokenish(s: &str) -> bool {
-    s.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'+' || b == b'/' || b == b'=')
+    s.bytes().all(|b| {
+        b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'+' || b == b'/' || b == b'='
+    })
 }
 
 fn tokenize(text: &str) -> impl Iterator<Item = &str> {
@@ -209,7 +216,8 @@ mod tests {
     fn finds_url_and_token() {
         let strings = vec![(
             "config.json".to_string(),
-            "see https://evil.example.com/x and key ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".to_string(),
+            "see https://evil.example.com/x and key ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+                .to_string(),
         )];
         let f = scan(&strings, None);
         assert!(f.iter().any(|x| x.id == "SUSPICIOUS_URL"));
@@ -218,7 +226,10 @@ mod tests {
 
     #[test]
     fn clean_text_is_quiet() {
-        let strings = vec![("config.json".to_string(), "hidden_size: 768, num_heads: 12".to_string())];
+        let strings = vec![(
+            "config.json".to_string(),
+            "hidden_size: 768, num_heads: 12".to_string(),
+        )];
         assert!(scan(&strings, None).is_empty());
     }
 }

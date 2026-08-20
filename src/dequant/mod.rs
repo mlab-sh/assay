@@ -28,11 +28,11 @@ impl QuantKind {
     /// Bytes per 32-weight block.
     pub fn block_size(self) -> usize {
         match self {
-            QuantKind::Q4_0 => 2 + QK / 2,      // d(f16) + 16 nibbles
-            QuantKind::Q4_1 => 2 + 2 + QK / 2,  // d + m + 16 nibbles
-            QuantKind::Q5_0 => 2 + 4 + QK / 2,  // d + qh(u32) + 16 nibbles
+            QuantKind::Q4_0 => 2 + QK / 2,     // d(f16) + 16 nibbles
+            QuantKind::Q4_1 => 2 + 2 + QK / 2, // d + m + 16 nibbles
+            QuantKind::Q5_0 => 2 + 4 + QK / 2, // d + qh(u32) + 16 nibbles
             QuantKind::Q5_1 => 2 + 2 + 4 + QK / 2,
-            QuantKind::Q8_0 => 2 + QK,          // d + 32 int8
+            QuantKind::Q8_0 => 2 + QK, // d + 32 int8
         }
     }
 }

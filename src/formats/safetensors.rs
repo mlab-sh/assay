@@ -25,13 +25,21 @@ pub fn analyze(artifact_name: &str, data: &[u8]) -> ArtifactReport {
     let mut report = ArtifactReport::new(artifact_name, "safetensors");
 
     if data.len() < 8 {
-        return malformed(report, "ST_HEADER_MALFORMED", "file shorter than 8-byte header length");
+        return malformed(
+            report,
+            "ST_HEADER_MALFORMED",
+            "file shorter than 8-byte header length",
+        );
     }
     let header_len = u64::from_le_bytes(data[0..8].try_into().unwrap());
     let header_end = match 8u64.checked_add(header_len) {
         Some(v) => v,
         None => {
-            return malformed(report, "ST_HEADER_MALFORMED", "header length overflows file size")
+            return malformed(
+                report,
+                "ST_HEADER_MALFORMED",
+                "header length overflows file size",
+            )
         }
     };
     if header_end as usize > data.len() {
@@ -49,13 +57,21 @@ pub fn analyze(artifact_name: &str, data: &[u8]) -> ArtifactReport {
     let header: Value = match serde_json::from_slice(header_bytes) {
         Ok(v) => v,
         Err(e) => {
-            return malformed(report, "ST_HEADER_MALFORMED", format!("header is not valid JSON: {e}"))
+            return malformed(
+                report,
+                "ST_HEADER_MALFORMED",
+                format!("header is not valid JSON: {e}"),
+            )
         }
     };
     let obj = match header.as_object() {
         Some(o) => o,
         None => {
-            return malformed(report, "ST_HEADER_MALFORMED", "header JSON is not an object")
+            return malformed(
+                report,
+                "ST_HEADER_MALFORMED",
+                "header JSON is not an object",
+            )
         }
     };
 
@@ -157,7 +173,8 @@ pub fn analyze(artifact_name: &str, data: &[u8]) -> ArtifactReport {
         }
 
         // Per-tensor digest over the actual bytes.
-        let digest = hash::blake3_hex(&data[data_start + begin as usize..data_start + end as usize]);
+        let digest =
+            hash::blake3_hex(&data[data_start + begin as usize..data_start + end as usize]);
         report
             .hashes
             .per_tensor
@@ -205,11 +222,7 @@ pub fn analyze(artifact_name: &str, data: &[u8]) -> ArtifactReport {
     report
 }
 
-fn malformed(
-    mut report: ArtifactReport,
-    id: &str,
-    detail: impl Into<String>,
-) -> ArtifactReport {
+fn malformed(mut report: ArtifactReport, id: &str, detail: impl Into<String>) -> ArtifactReport {
     report.verdict = Verdict::Malformed;
     report.push(Finding::new(id, Severity::High, detail));
     report
@@ -247,8 +260,8 @@ pub fn extract(data: &[u8]) -> Result<StExtract, String> {
     if header_end > data.len() {
         return Err("header length exceeds file".into());
     }
-    let header: Value =
-        serde_json::from_slice(&data[8..header_end]).map_err(|e| format!("bad header json: {e}"))?;
+    let header: Value = serde_json::from_slice(&data[8..header_end])
+        .map_err(|e| format!("bad header json: {e}"))?;
     let obj = header.as_object().ok_or("header is not an object")?;
 
     let data_start = header_end;

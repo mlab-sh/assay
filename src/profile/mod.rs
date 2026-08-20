@@ -112,7 +112,11 @@ pub fn build(per_tensor: &[PerTensorStats], mad_k: f64) -> (Vec<ProfilePoint>, V
             },
             max_abs: a.max_abs,
             params: a.params,
-            sparsity: if a.elems > 0.0 { a.zeros / a.elems } else { 0.0 },
+            sparsity: if a.elems > 0.0 {
+                a.zeros / a.elems
+            } else {
+                0.0
+            },
             anomaly: None,
         })
         .collect();

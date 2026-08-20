@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Lints
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --all --locked
+
+  selftest:
+    name: Detection self-test
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-selftest-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      # The TEST.md self-test, run against the artifact we would ship: a benign
+      # `echo` pickle must be flagged and must fail the gate. If this passes
+      # with exit 0, the scanner is broken.
+      - name: Pickle scanner fires on a benign payload
+        run: |
+          python3 - <<'PY'
+          import pickle, os
+          class Probe:
+              def __reduce__(self):
+                  return (os.system, ("echo assay-detection-selftest",))
+          with open("selftest.pkl", "wb") as f:
+              pickle.dump(Probe(), f)
+          PY
+          set +e
+          ./target/release/assay scan ./selftest.pkl --fail-on high
+          code=$?
+          set -e
+          rm -f selftest.pkl
+          if [ "$code" -eq 0 ]; then
+            echo "::error::pickle scanner did not flag a known RCE payload"
+            exit 1
+          fi
+          echo "self-test ok (exit $code)"
+
+      - name: A clean safetensors file passes
+        run: |
+          python3 - <<'PY'
+          import json, struct
+          header = {"t": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]}}
+          blob = json.dumps(header).encode()
+          with open("clean.safetensors", "wb") as f:
+              f.write(struct.pack("<Q", len(blob)))
+              f.write(blob)
+              f.write(b"\x00" * 8)
+          PY
+          ./target/release/assay scan ./clean.safetensors --fail-on high
+          rm -f clean.safetensors

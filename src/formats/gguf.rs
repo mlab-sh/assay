@@ -188,7 +188,9 @@ fn parse(data: &[u8], report: &mut ArtifactReport) -> Result<(), String> {
                         t.name, t.offset
                     ),
                 )
-                .with_evidence(vec![format!("data_start={data_start}, alignment={alignment}")]),
+                .with_evidence(vec![format!(
+                    "data_start={data_start}, alignment={alignment}"
+                )]),
             );
             report.verdict = Verdict::Untrusted;
         }
@@ -428,7 +430,10 @@ mod tests {
 
     #[test]
     fn valid_minimal_is_clean() {
-        let b = Builder::new(3, 0, 1).kv_string("general.name", "test").buf.clone();
+        let b = Builder::new(3, 0, 1)
+            .kv_string("general.name", "test")
+            .buf
+            .clone();
         let r = analyze("m.gguf", &b);
         assert_eq!(r.verdict, Verdict::Clean);
     }
