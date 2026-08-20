@@ -140,6 +140,15 @@ fn parse(data: &[u8], report: &mut ArtifactReport) -> Result<(), String> {
                 )
                 .with_evidence(vec![format!("{key}: {snippet}")]),
             );
+            // And do the review we just asked for.
+            if let Some(source) = captured.string.as_deref() {
+                for f in crate::template::analyze(source, "the GGUF metadata") {
+                    if f.severity >= Severity::Medium {
+                        report.verdict = Verdict::Untrusted;
+                    }
+                    report.push(f);
+                }
+            }
         }
     }
 

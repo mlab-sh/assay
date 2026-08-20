@@ -1289,3 +1289,97 @@ fn an_unknown_quant_type_is_an_admission_not_an_accusation() {
     assert!(!out.contains("GGUF_UNREFERENCED_BYTES"), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ===========================================================================
+// Chat templates: code that runs on every conversation
+// ===========================================================================
+
+/// A chat template is rendered before the model answers anything, so a sandbox
+/// escape in it is an RCE on the first message.
+#[test]
+fn a_template_escaping_the_jinja_sandbox_fails_the_gate() {
+    let dir = tmpdir("tpl-escape");
+    write(
+        &dir,
+        "model.safetensors",
+        &safetensors_f32(&[("model.layers.0.w", vec![1.0, 2.0])]),
+    );
+    write(
+        &dir,
+        "chat_template.jinja",
+        b"{%- for m in messages %}{{ m.content }}{%- endfor %}\n\
+          {{ cycler.__init__.__globals__.os.popen('id').read() }}",
+    );
+
+    let (code, out) = run(&["scan", dir.to_str().unwrap(), "--fail-on", "high"]);
+    assert_eq!(code, 1, "an SSTI payload must fail the gate\n{out}");
+    assert!(out.contains("TEMPLATE_SANDBOX_ESCAPE"), "{out}");
+    assert!(out.contains("__globals__"), "{out}");
+    assert!(
+        out.contains("[template]"),
+        "the template is an artifact:\n{out}"
+    );
+    // The weights themselves are untouched by any of this.
+    assert!(out.contains("CLEAN"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_template_hidden_in_the_tokenizer_config_is_found_too() {
+    let dir = tmpdir("tpl-tokcfg");
+    write(
+        &dir,
+        "model.safetensors",
+        &safetensors_f32(&[("model.layers.0.w", vec![1.0, 2.0])]),
+    );
+    write(
+        &dir,
+        "tokenizer_config.json",
+        br#"{"model_max_length": 4096,
+             "chat_template": "{{ ''.__class__.__mro__[1].__subclasses__() }}"}"#,
+    );
+
+    let (code, out) = run(&["scan", dir.to_str().unwrap(), "--json"]);
+    assert_eq!(code, 1, "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let cfg = v["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["format"] == "config")
+        .expect("a config artifact");
+    assert_eq!(cfg["findings"][0]["id"], "TEMPLATE_SANDBOX_ESCAPE");
+    assert!(cfg["hashes"]["file"]
+        .as_str()
+        .unwrap()
+        .starts_with("blake3:"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The check has to stay silent on the templates every modern repo ships, or
+/// nobody will read it.
+#[test]
+fn an_ordinary_chat_template_adds_no_noise() {
+    let dir = tmpdir("tpl-normal");
+    let p = write(
+        &dir,
+        "model.safetensors",
+        &safetensors_f32(&[("model.layers.0.w", vec![1.0, 2.0])]),
+    );
+    write(
+        &dir,
+        "chat_template.jinja",
+        b"{%- set ns = namespace(system='') %}\n\
+          {%- for message in messages %}\n\
+          {{- '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>' }}\n\
+          {%- endfor %}\n\
+          {%- if add_generation_prompt %}{{- '<|im_start|>assistant\\n' }}{%- endif %}",
+    );
+
+    let (code, out) = run(&["scan", dir.to_str().unwrap(), "--fail-on", "high"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("TEMPLATE_"), "false positive:\n{out}");
+    assert!(out.contains("scanned 1 artifact(s)"), "{out}");
+    assert!(p.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -160,6 +160,11 @@ pub fn run(
     for ar in crate::remote_code::scan(path) {
         report.artifacts.push(ar);
     }
+    // A chat template is rendered on every conversation, so it runs before the
+    // model answers anything.
+    for ar in crate::template::scan_repo(path) {
+        report.artifacts.push(ar);
+    }
 
     if report.artifacts.is_empty() {
         report.nothing_scanned = true;

@@ -139,6 +139,43 @@ Matching is call-aware, so ordinary torch code (`model.eval()`,
 `torch.compile()`) is not mistaken for `eval(` and `compile(`. Symlinks out of
 the repo are not followed: what gets judged is the repo itself.
 
+### Chat templates
+
+A chat template is not inert text. `transformers` renders it for every
+conversation, so it runs before the model produces a single token. It renders
+in a Jinja sandbox, which means a payload cannot simply call `os.system`: it has
+to **escape** first, by pivoting through Python's object graph (`__class__`,
+`__mro__`, `__subclasses__`, `__globals__`) or through one of the Jinja globals
+that leak a reference to it (`lipsum`, `cycler`, `joiner`).
+
+That is what makes the check worth having: formatting a conversation needs none
+of those. `assay` extracts the `{{ … }}` and `{% … %}` regions, which are the
+only places a template executes anything, and reports what it finds there:
+
+- `TEMPLATE_SANDBOX_ESCAPE` (high): an object-graph pivot, named with the line
+  it appears on
+- `TEMPLATE_GADGET_GLOBAL` (medium): `lipsum`, `cycler` or `joiner`, which
+  generate filler text and are mainly known as escape pivots
+- `TEMPLATE_DYNAMIC_ATTRIBUTE`: an attribute looked up by computed name
+  (`|attr`, `getattr`), which is how a payload names `__class__` without
+  writing it. Medium on its own, **high** when the name is also assembled from
+  pieces, because `getattr(ns, '__in' ~ 'it__')` is not something anyone types
+  by accident
+- `TEMPLATE_OBFUSCATION` (medium): names built at render time from `chr()`,
+  hex escapes, concatenation or `|join`
+
+Templates are found wherever they live: `chat_template.jinja`,
+`chat_template.json`, the `chat_template` field of `tokenizer_config.json`
+(including the named-list form), and the `tokenizer.chat_template` key inside
+GGUF metadata. A template with findings becomes its own artifact, with its own
+verdict and file hash. A template with nothing to report stays silent, because
+every modern repo ships one and an artifact per repo saying "a template is
+present" is noise nobody reads.
+
+`namespace` is deliberately not treated as a gadget: real chat templates use it
+for bookkeeping. The suite checks that against reproductions of the templates in
+wide use, and any finding on those would be a bug.
+
 ### safetensors structural validation
 
 The format is safe by design, but the container still has attack surface
@@ -523,6 +560,14 @@ artifact looks like.
 | `IO_ERROR`, `PATH_NOT_FOUND` | high |
 | `UNKNOWN_FORMAT` | medium |
 | `SAFE_ALTERNATIVE_AVAILABLE`, `NO_ARTIFACTS`, `ALIASED_ARTIFACT` | info |
+
+**Chat templates**
+
+| ID | Severity |
+|---|---|
+| `TEMPLATE_SANDBOX_ESCAPE` | high |
+| `TEMPLATE_DYNAMIC_ATTRIBUTE` | high with an assembled name, otherwise medium |
+| `TEMPLATE_GADGET_GLOBAL`, `TEMPLATE_OBFUSCATION` | medium |
 
 **Code shipped with the weights**
 

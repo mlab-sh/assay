@@ -24,6 +24,7 @@ mod secrets;
 mod signature;
 mod stats;
 mod style;
+mod template;
 mod values;
 
 use std::io::IsTerminal;

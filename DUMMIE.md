@@ -330,6 +330,58 @@ can audit every byte you downloaded and still be executing someone else's code.
 
 ---
 
+### 2.2c The chat template is code too
+
+The template that formats your conversation is rendered **before the model
+answers anything**, on every single message. It renders in a Jinja sandbox, so
+a payload cannot just call `os.system`. It has to climb out first:
+
+```
+  ''            a harmless string
+   .__class__   -> <class 'str'>
+   .__mro__     -> (str, object)
+   [1]          -> object
+   .__subclasses__()   -> every class loaded in the process
+   [...]        -> pick one that wraps os
+   .__init__.__globals__['os'].popen('id').read()
+                                        ^^^^^^^ out of the sandbox
+```
+
+Every step of that ladder is a Python dunder, and **no chat template needs a
+single one of them** to put `<|im_start|>` around a message. That is what makes
+the signal clean: it is not a heuristic about suspicious-looking text, it is the
+absence of any legitimate reason.
+
+`assay` extracts the `{{ … }}` and `{% … %}` regions, the only places a
+template runs anything (literal text between them is just output, and `{# … #}`
+is a comment), then reports:
+
+| Finding | What it means |
+|---|---|
+| `TEMPLATE_SANDBOX_ESCAPE` | an object-graph pivot: `__class__`, `__mro__`, `__globals__`, … |
+| `TEMPLATE_GADGET_GLOBAL` | `lipsum`, `cycler`, `joiner`: filler-text helpers, famous only as escape pivots |
+| `TEMPLATE_DYNAMIC_ATTRIBUTE` | `\|attr` or `getattr`: naming an attribute without writing it |
+| `TEMPLATE_OBFUSCATION` | the name assembled from `chr()`, hex, concatenation or `\|join` |
+
+**The evasion, and why it does not work.** Write `__class__` and you are
+caught, so payloads split the name:
+
+```
+{{ ''|attr('__cl'+'ass__') }}          <- the dunder never appears whole
+{% set c = getattr(ns, '__in'~'it__') %}
+```
+
+A computed attribute name alone is `medium`. A computed name that is *also*
+assembled from pieces is `high`, because nobody types that by accident.
+
+**What is deliberately not flagged:** `namespace`. Real templates use it for
+bookkeeping (`{%- set ns = namespace(is_first=false) %}`), so flagging it would
+fire on a large share of modern repos, and a warning that fires on everything is
+a warning nobody reads. Only `namespace.__init__` is an escape, and the dunder
+catches that on its own.
+
+---
+
 ### 2.3 safetensors structural validation
 
 `safetensors` is **safe by design** (no code), but still has format-level attack

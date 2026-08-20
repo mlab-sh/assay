@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Chat templates are analyzed, not just pointed at.** `GGUF_CHAT_TEMPLATE`
+  said "a template is present, review before trusting" and left the reviewing
+  to you. A template is rendered on every conversation, so it runs before the
+  model answers anything, and it renders in a Jinja sandbox: a payload has to
+  escape first, by pivoting through Python's object graph (`__class__`,
+  `__mro__`, `__subclasses__`, `__globals__`) or through a Jinja global that
+  leaks a reference to it (`lipsum`, `cycler`, `joiner`). Formatting a
+  conversation needs none of that, which is what makes the signal clean.
+
+  `assay` now parses out the `{{ … }}` and `{% … %}` regions, the only places a
+  template executes anything, and reports `TEMPLATE_SANDBOX_ESCAPE` (high),
+  `TEMPLATE_GADGET_GLOBAL`, `TEMPLATE_DYNAMIC_ATTRIBUTE` (high when the
+  attribute name is also assembled from pieces, which is how `__class__` gets
+  written without being written) and `TEMPLATE_OBFUSCATION`, each with the line
+  it appears on.
+
+  Templates are found in `chat_template.jinja`, `chat_template.json`, the
+  `chat_template` field of `tokenizer_config.json` including its named-list
+  form, and GGUF metadata. A template with findings becomes its own artifact
+  with its own verdict and file hash; one with nothing to report stays silent.
+  `namespace` is not treated as a gadget, because real templates use it, and
+  the suite guards that with reproductions of the templates in wide use.
+
 - **Byte accounting now covers GGUF as well as safetensors.** The invariant is
   the same: every byte of the file belongs to the header, to a declared tensor,
   or to the alignment padding the format requires, and anything else is a
