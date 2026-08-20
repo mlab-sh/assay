@@ -353,6 +353,7 @@ For `safetensors`, `assay` computes:
    per tensor :  blake3(raw tensor bytes)
    manifest   :  blake3( for each tensor sorted by name:
                          name ‖ dtype ‖ shape ‖ digest )
+   file       :  blake3(the whole artifact, every byte)
 ```
 
 ```
@@ -364,9 +365,34 @@ For `safetensors`, `assay` computes:
 └───────────────────────────────────────────────────────────┘
 ```
 
-```json
-"hashes": { "manifest": "blake3:4a31feadd70daefe…" }
+That stability has a price, and it is worth understanding: the manifest hash
+describes the **model**, not the **file**. Bytes that belong to no tensor are
+outside its definition, so two artifacts can carry the same manifest hash and
+not be the same file at all:
+
 ```
+clean.safetensors      : [header][ tensor a ]
+polyglot.safetensors   : [header][ tensor a ][ PK\x03\x04 … 200 bytes … ]
+
+   manifest : blake3:413bde3d…   IDENTICAL, same tensors
+   file     : blake3:9d346680…   vs  blake3:0beb8d68…   DIFFERENT
+```
+
+So there are two digests, answering two questions. `manifest` for "is this the
+same model?", `file` for "is this the same file?". The second is computed for
+every artifact, including pickles, which have no tensors and therefore no
+manifest hash, but which you still want to pin:
+
+```json
+"hashes": {
+  "manifest": "blake3:4a31feadd70daefe…",
+  "file": "blake3:3bca1b7f6c327dae…"
+}
+```
+
+The byte accounting from 2.3 and the file hash are two sides of one idea:
+`assay` should never sign off on bytes it cannot explain, and never report an
+identity that hides a difference.
 
 ---
 

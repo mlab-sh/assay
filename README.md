@@ -129,10 +129,20 @@ template, which is a code-ish injection surface. `assay`:
 
 ### Deterministic hashing
 
-A per-tensor digest plus a manifest hash that is stable across
-re-containerization: renaming the file or repacking the archive does not change
-the model's identity, because the hash depends only on tensor identity and
-tensor content. That manifest hash is what you pin in CI.
+Two digests, because there are two different questions.
+
+The **manifest hash** is the model's identity: a per-tensor digest folded into
+one hash that covers tensor names, dtypes, shapes and content, and nothing
+else. It survives re-containerization, so renaming the file or repacking the
+archive does not change it. That is what you pin when you want to know the
+*model* is the same.
+
+The **file hash** is the digest of the artifact exactly as it sits on disk,
+every byte included. Two files can share a manifest hash and still differ, for
+instance when one has an archive stapled after the last tensor, so the file hash
+is what you pin when you want to know that *nothing at all* changed. It is
+computed for every artifact, including pickles, which have no tensors and
+therefore no manifest hash but are still worth pinning.
 
 ### Signature and provenance verification
 
@@ -269,6 +279,7 @@ $ assay scan ./models/gpt2 --deep --profile
 
 ./models/gpt2/model.safetensors  [safetensors]  -> CLEAN
   manifest: blake3:d4ceed607f7040ba84b91eadef010d98079f9d9d85ffd6faf13d77ce958eccdf
+  file: blake3:3bca1b7f6c327daecafc16e52d1319375299354e35413fb4e18d24e59b77ce06
   signature: unsigned
   [low] WEIGHT_OUTLIER_LAYER: layer 3 is anomalous on mean_kurtosis (6.0 MADs from the cross-layer median); worth a human look, not a verdict
       - metric=mean_kurtosis, value=119.9821, mads=6.00
@@ -278,6 +289,7 @@ $ assay scan ./models/gpt2 --deep --profile
       - layers=Some(12), hidden=Some(768), heads=Some(12), vocab=Some(50257)
 
 ./models/gpt2/pytorch_model.bin  [pickle]  -> UNTRUSTED
+  file: blake3:4216aebca2f4e9256cdb1e9955c1fd43c1fa179bd9e4c3c4a10bbce0a5acb213
   signature: unsigned
   [high] PICKLE_RCE_RISK: pickle artifact can execute code at load time
       - execution opcodes: REDUCE, BUILD
@@ -369,13 +381,16 @@ object directly; a directory scan wraps them in `{ "artifacts": [ ... ] }`:
       "detail": "pickle opcode stream ended unexpectedly or hit an unknown opcode; analysis may be incomplete"
     }
   ],
+  "hashes": {
+    "file": "blake3:4216aebca2f4e9256cdb1e9955c1fd43c1fa179bd9e4c3c4a10bbce0a5acb213"
+  },
   "signature": "unsigned"
 }
 ```
 
-For `safetensors` and GGUF the report also carries `hashes` (`manifest` plus
-`per_tensor`), and with `--deep` it gains `stats`, `layer_profile`, and
-`fingerprint`. A `compare --json` report carries `subject`, `baseline`, `arch`,
+`hashes.file` is present for every artifact. For `safetensors` and GGUF the
+block also carries `manifest` and `per_tensor`, and with `--deep` the report
+gains `stats`, `layer_profile`, and `fingerprint`. A `compare --json` report carries `subject`, `baseline`, `arch`,
 `structural_divergences`, `tensor_drift`, `layer_drift`, `findings`, and
 `summary`.
 
@@ -395,8 +410,11 @@ assay scan ./models/ --json --fail-on high | tee assay-report.json
     assay scan ./models/ --json --fail-on high | tee assay-report.json
 ```
 
-Pin the manifest hash from a known-good run and compare it on every build: a
-changed manifest means the weights changed, whatever the filename says.
+Pin both digests from a known-good run and compare them on every build. A
+changed `manifest` means the weights changed, whatever the filename says. A
+changed `file` with an unchanged `manifest` means the model is the same but the
+bytes around it are not, which is exactly what stapling a payload onto a valid
+artifact looks like.
 
 ---
 
@@ -452,8 +470,8 @@ changed manifest means the weights changed, whatever the filename says.
   box and run it.
 - **Honest confidence.** Every finding carries a severity, and a statistical
   signal is never dressed up as a verdict.
-- **Deterministic.** The same bytes always produce the same manifest hash and
-  the same verdicts.
+- **Deterministic.** The same bytes always produce the same digests and the
+  same verdicts.
 - **Dogfoodable.** Built to be run on real artifacts pulled off public hubs.
 
 ---

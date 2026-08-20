@@ -100,19 +100,33 @@ impl Verdict {
     }
 }
 
-/// Hashes computed for an artifact. `manifest` is the rename/repack-stable
-/// identity anchor; `per_tensor` is included only when non-empty.
+/// Hashes computed for an artifact.
+///
+/// The two top-level digests answer different questions and neither replaces
+/// the other:
+///
+/// * `manifest` is the rename/repack-stable *model identity*: it covers tensor
+///   names, dtypes, shapes and content, and nothing else. Two files with the
+///   same manifest hash hold the same model, but they are not necessarily the
+///   same bytes.
+/// * `file` is the digest of the artifact exactly as it sits on disk, every
+///   byte included. It is what you pin when you want to know that nothing at
+///   all changed, including bytes no tensor claims.
+///
+/// `per_tensor` is included only when non-empty.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Hashes {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub per_tensor: BTreeMap<String, String>,
 }
 
 impl Hashes {
     pub fn is_empty(&self) -> bool {
-        self.manifest.is_none() && self.per_tensor.is_empty()
+        self.manifest.is_none() && self.file.is_none() && self.per_tensor.is_empty()
     }
 }
 
@@ -231,6 +245,9 @@ impl ScanReport {
                     styler.dim("manifest:"),
                     styler.dim(m)
                 ));
+            }
+            if let Some(f) = &a.hashes.file {
+                out.push_str(&format!("  {} {}\n", styler.dim("file:"), styler.dim(f)));
             }
             out.push_str(&format!("  {} {}\n", styler.dim("signature:"), a.signature));
             for f in &a.findings {
@@ -375,6 +392,39 @@ mod tests {
         assert!(v.get("stats").is_none());
         assert!(v.get("layer_profile").is_none());
         assert!(v.get("fingerprint").is_none());
+    }
+
+    #[test]
+    fn both_digests_are_serialized_and_named() {
+        let mut a = ArtifactReport::new("m.safetensors", "safetensors");
+        a.hashes.manifest = Some("blake3:aaa".into());
+        a.hashes.file = Some("blake3:bbb".into());
+        let v: serde_json::Value = serde_json::from_str(&scan(vec![a]).to_json()).unwrap();
+        assert_eq!(v["hashes"]["manifest"], "blake3:aaa");
+        assert_eq!(v["hashes"]["file"], "blake3:bbb");
+    }
+
+    #[test]
+    fn a_file_digest_alone_is_enough_to_emit_the_hashes_block() {
+        // Pickle artifacts have no tensors, but they are still pinnable.
+        let mut a = ArtifactReport::new("m.bin", "pickle");
+        assert!(a.hashes.is_empty());
+        a.hashes.file = Some("blake3:ccc".into());
+        assert!(!a.hashes.is_empty());
+        let v: serde_json::Value = serde_json::from_str(&scan(vec![a]).to_json()).unwrap();
+        assert_eq!(v["hashes"]["file"], "blake3:ccc");
+        assert!(v["hashes"].get("manifest").is_none());
+    }
+
+    #[test]
+    fn the_human_report_prints_both_digests() {
+        let styler = crate::style::Styler::new(false);
+        let mut a = ArtifactReport::new("m.safetensors", "safetensors");
+        a.hashes.manifest = Some("blake3:aaa".into());
+        a.hashes.file = Some("blake3:bbb".into());
+        let out = scan(vec![a]).to_human(&styler);
+        assert!(out.contains("manifest: blake3:aaa"), "{out}");
+        assert!(out.contains("file: blake3:bbb"), "{out}");
     }
 
     #[test]

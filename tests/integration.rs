@@ -895,3 +895,50 @@ fn a_normally_packed_model_stays_clean() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Two files holding the same model, one with an archive stapled to the end.
+/// The manifest hash is identical by design, so the report must expose a
+/// second digest that is not.
+#[test]
+fn the_polyglot_and_its_clean_twin_are_distinguishable() {
+    let dir = tmpdir("twin");
+    let buf = safetensors_f32(&[("model.layers.0.w", vec![1.0, 2.0, 3.0, 4.0])]);
+    let clean = write(&dir, "clean.safetensors", &buf);
+
+    let mut polyglot_bytes = buf.clone();
+    polyglot_bytes.extend_from_slice(b"PK\x03\x04");
+    polyglot_bytes.extend_from_slice(&[0x41; 256]);
+    let polyglot = write(&dir, "polyglot.safetensors", &polyglot_bytes);
+
+    let (code_a, out_a) = run(&["scan", clean.to_str().unwrap(), "--json"]);
+    let (code_b, out_b) = run(&["scan", polyglot.to_str().unwrap(), "--json"]);
+    assert_eq!(code_a, 0, "{out_a}");
+    assert_eq!(code_b, 1, "the polyglot must fail the gate\n{out_b}");
+
+    let a: serde_json::Value = serde_json::from_str(&out_a).unwrap();
+    let b: serde_json::Value = serde_json::from_str(&out_b).unwrap();
+
+    assert_eq!(
+        a["hashes"]["manifest"], b["hashes"]["manifest"],
+        "same tensors, so the model identity is the same"
+    );
+    assert_ne!(
+        a["hashes"]["file"], b["hashes"]["file"],
+        "different bytes must produce different file digests"
+    );
+    assert!(a["hashes"]["file"].as_str().unwrap().starts_with("blake3:"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A pickle has no tensors and therefore no manifest hash, but it is still an
+/// artifact you want to pin in CI.
+#[test]
+fn a_pickle_is_pinnable_too() {
+    let dir = tmpdir("pin");
+    let p = write(&dir, "model.pkl", &os_system_pickle());
+    let (_code, out) = run(&["scan", p.to_str().unwrap(), "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(v["hashes"]["manifest"].is_null());
+    assert!(v["hashes"]["file"].as_str().unwrap().starts_with("blake3:"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

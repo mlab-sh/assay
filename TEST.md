@@ -37,8 +37,8 @@ hf download sentence-transformers/all-MiniLM-L6-v2 --local-dir ./minilm
 assay scan ./minilm/ --json
 ```
 
-A well-behaved repo. You should get exit code `0` and a manifest hash you can
-pin in CI. This is what "boring and trustworthy" looks like.
+A well-behaved repo. You should get exit code `0` and two hashes you can pin in
+CI: `manifest` for the model identity, `file` for the exact bytes. This is what "boring and trustworthy" looks like.
 
 ---
 
@@ -98,7 +98,7 @@ assay scan ./models/ --json --fail-on high \
 ```
 
 Non-zero exit blocks the merge. The JSON report is your audit trail: format,
-verdict, findings, and a stable manifest hash per artifact.
+verdict, findings, and both a manifest and a file hash per artifact.
 
 ---
 

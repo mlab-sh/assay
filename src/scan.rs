@@ -78,6 +78,12 @@ pub fn run(
             }
         };
 
+        // Whole-file digest, for every format including pickle and unknown.
+        // The manifest hash deliberately covers only tensor identity and
+        // content, so it cannot distinguish two files that differ in bytes no
+        // tensor claims. This one can.
+        ar.hashes.file = Some(crate::hash::tagged(&crate::hash::blake3_hex(data)));
+
         // Cross-artifact signal: prefer the safe alternative over a pickle.
         if ar.format == "pickle" && has_safetensors {
             ar.push(Finding::new(
@@ -318,6 +324,58 @@ mod tests {
         // The container answer is still complete: hashed and signature-checked.
         assert!(a.hashes.manifest.is_some());
         assert_eq!(a.signature, "unsigned");
+    }
+
+    #[test]
+    fn every_artifact_gets_a_whole_file_digest() {
+        let dir = tmpdir("filehash");
+        let st = write(&dir, "model.safetensors", &safetensors_bytes());
+        let pk = write(&dir, "pytorch_model.bin", &rce_pickle());
+        let unknown = write(&dir, "weights.ckpt", b"not a model at all");
+
+        for p in [&st, &pk, &unknown] {
+            let report = run_scan(p);
+            let h = &report.artifacts[0].hashes.file;
+            assert!(
+                h.as_deref().is_some_and(|h| h.starts_with("blake3:")),
+                "{} has no file digest",
+                p.display()
+            );
+        }
+    }
+
+    /// The point of the whole-file digest: the manifest hash covers the model,
+    /// not the file. Bytes appended after the last tensor leave the manifest
+    /// untouched, so only the file digest can tell the two apart.
+    #[test]
+    fn appended_bytes_keep_the_manifest_but_change_the_file_digest() {
+        let dir = tmpdir("twin");
+        let clean = write(&dir, "clean.safetensors", &safetensors_bytes());
+        let mut tampered_bytes = safetensors_bytes();
+        tampered_bytes.extend_from_slice(b"PK\x03\x04appended archive");
+        let tampered = write(&dir, "polyglot.safetensors", &tampered_bytes);
+
+        let a = run_scan(&clean);
+        let b = run_scan(&tampered);
+        let (ha, hb) = (&a.artifacts[0].hashes, &b.artifacts[0].hashes);
+
+        assert_eq!(
+            ha.manifest, hb.manifest,
+            "same tensors, same model identity"
+        );
+        assert_ne!(ha.file, hb.file, "different bytes must hash differently");
+        assert!(ids(&b.artifacts[0]).contains(&"ST_UNREFERENCED_BYTES"));
+    }
+
+    #[test]
+    fn the_file_digest_covers_content_not_the_filename() {
+        let dir = tmpdir("filerename");
+        let a = write(&dir, "model.safetensors", &safetensors_bytes());
+        let b = write(&dir, "renamed.safetensors", &safetensors_bytes());
+        assert_eq!(
+            run_scan(&a).artifacts[0].hashes.file,
+            run_scan(&b).artifacts[0].hashes.file
+        );
     }
 
     #[test]

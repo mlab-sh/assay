@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A whole-file digest, `hashes.file`, next to the manifest hash.** The
+  manifest hash covers tensor identity and content only, which is what makes it
+  survive renaming and repacking, but it also means two different files can
+  present the same one: staple an archive after the last tensor and the model
+  identity is unchanged. Every artifact now also carries `blake3` over its
+  exact bytes, so the report can distinguish them. It is computed for every
+  format, including pickle and unrecognized artifacts, which had no pinnable
+  hash at all until now. Pin `manifest` to answer "is this the same model", pin
+  `file` to answer "is this the same file".
+
 ### Fixed
 
 - **A payload hidden between two tensors no longer scans clean.** Validating
