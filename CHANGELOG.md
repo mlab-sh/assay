@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **A payload hidden between two tensors no longer scans clean.** Validating
+  that every `data_offsets` range is in bounds, ordered, and non-overlapping
+  said nothing about the bytes *between* those ranges. A file with a 64-byte
+  hole carrying an ELF header and a shell command reported `CLEAN` and exit `0`,
+  including under `--deep`. `safetensors` now accounts for every byte of the
+  data segment: any run no tensor claims is reported as
+  `ST_UNREFERENCED_BYTES`, with absolute file offsets and an escaped preview.
+  Severity is `high` when the bytes carry a recognizable file signature (ELF,
+  Mach-O, PE, ZIP, gzip, bzip2, xz, 7-Zip, PDF, PNG, a pickle stream, a
+  shebang), `medium` for other non-zero content, and `low` for zero-filled
+  padding. Non-zero unclaimed bytes make the artifact `untrusted`.
+
+  The same accounting closes the sibling case: anything appended after the last
+  tensor, which is how one file becomes a valid `safetensors` and a valid ZIP at
+  the same time. Real writers pack tensors contiguously (verified on gpt2 and
+  DialoGPT: zero unclaimed bytes), so the check is silent on well-formed models.
+
+  Note that the manifest hash still covers only tensor identity and content, by
+  design. Two files with the same manifest hash can differ in unclaimed bytes,
+  which is exactly why those bytes are now reported.
 
 ## [0.1.0] - 2026-08-20
 

